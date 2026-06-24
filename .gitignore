@@ -9,3 +9,6 @@ venv/
 .ruff_cache/
 *.egg-info/
 .DS_Store
+
+# Eval run artifacts (regenerated each run; the scorecards are kept)
+eval/last_run*.json

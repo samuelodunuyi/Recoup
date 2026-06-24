@@ -15,7 +15,10 @@ had a recurring card/mobile-money charge fail. Read the latest customer message 
 Return JSON: {{"route": "<one of: {", ".join(sorted(Route.ALL))}>", "reason": "<short>"}}
 
 Definitions:
-- new_failure: no customer reply yet, or they just learned about the failure.
+- new_failure: first contact only — use this ONLY when there is no prior
+  conversation history. If history exists, the customer is replying, so pick one of
+  the other states (e.g. an affirmative reply like "yes please" after an offer is
+  pay_later).
 - already_paid: customer claims they have already paid.
 - pay_later: customer intends to pay but not now (e.g. "after payday", "Friday").
 - dispute: customer questions or rejects the charge ("why was I charged?").
@@ -44,11 +47,16 @@ Emit JSON with this exact shape:
   }}
 }}
 
-Action guidance:
-- SEND_PAYMENT_LINK: customer is ready/willing now (new_failure, or pay_later who can pay now).
-- SCHEDULE_RETRY: customer commits to a later time — capture it in schedule_for and promise.
+Action guidance (pick exactly one):
+- SEND_PAYMENT_LINK: use for a new_failure (first contact) and whenever the customer
+  is willing to pay now. On first contact, greet warmly, explain the failure, and
+  attach a fresh link — you may also offer a payday retry as an option, but still
+  emit SEND_PAYMENT_LINK so the customer has a way to pay immediately.
+- SCHEDULE_RETRY: the customer wants to pay later. This includes vague delays like
+  "later" — ask when and still use SCHEDULE_RETRY (not SEND_PAYMENT_LINK).
 - ESCALATE_TO_HUMAN: route is needs_human, or a genuine dispute you cannot resolve.
-- NONE: just acknowledging (e.g. already_paid — thank them, no link needed).
+- NONE: pure acknowledgement with no payment needed. For already_paid, thank the
+  customer and reassure them it will reflect — use NONE, do NOT escalate.
 Do not invent payment links; the system attaches the real link when type is SEND_PAYMENT_LINK.
 """
 

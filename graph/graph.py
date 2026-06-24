@@ -26,7 +26,11 @@ from graph.state import RecoveryState
 
 
 def _route_decider(state: RecoveryState) -> str:
-    return "escalate" if state.get("route") == Route.NEEDS_HUMAN else "recover"
+    # Disputes and explicit escalations skip the Negotiator and hand off to a human
+    # deterministically — the agent shouldn't try to recover a contested charge.
+    if state.get("route") in (Route.NEEDS_HUMAN, Route.DISPUTE):
+        return "escalate"
+    return "recover"
 
 
 def build_graph():

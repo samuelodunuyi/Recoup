@@ -128,15 +128,23 @@ def negotiator_node(state: RecoveryState) -> dict:
     return {"reply": reply, "action": action}
 
 
-# ─── Node 3b: deterministic escalation (skips the LLM for needs_human) ───────
+# ─── Node 3b: deterministic escalation (skips the LLM for dispute/needs_human) ─
 _ESCALATION_REPLY = {
-    "english": (
+    ("default", "english"): (
         "Thanks for letting us know — I'm passing this to a member of our team "
         "who'll follow up with you shortly."
     ),
-    "pidgin": (
-        "Thank you for telling us. I go pass this one give person for our team, "
-        "dem go reach you soon."
+    ("default", "pidgin"): (
+        "Thank you say you tell us o. I don pass am give our team, dem go reach "
+        "you sharp sharp."
+    ),
+    ("dispute", "english"): (
+        "I understand your concern about this charge — let me connect you with "
+        "someone on our team who can look into it and sort it out for you."
+    ),
+    ("dispute", "pidgin"): (
+        "I sabi say this charge dey worry you. Make I connect you with our team "
+        "wey go check am well well and sort am out for you, no wahala."
     ),
 }
 
@@ -144,8 +152,10 @@ _ESCALATION_REPLY = {
 @traced
 def escalate_node(state: RecoveryState) -> dict:
     language = state.get("language", "english")
+    kind = "dispute" if state.get("route") == Route.DISPUTE else "default"
+    reply = _ESCALATION_REPLY.get((kind, language), _ESCALATION_REPLY[("default", "english")])
     return {
-        "reply": _ESCALATION_REPLY.get(language, _ESCALATION_REPLY["english"]),
+        "reply": reply,
         "action": {"type": Action.ESCALATE_TO_HUMAN, "schedule_for": None, "promise": None},
     }
 

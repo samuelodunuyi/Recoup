@@ -1,0 +1,40 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: recoup
+      POSTGRES_PASSWORD: recoup
+      POSTGRES_DB: recoup
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once on first init: enables the pgvector extension for Day 3's RAG store.
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recoup -d recoup"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    env_file: .env
+    environment:
+      # Override the .env default (host `db`) so the app reaches the compose service.
+      DATABASE_URL: postgresql://recoup:recoup@db:5432/recoup
+    ports:
+      - "8000:8000"
+    volumes:
+      # Live-reload the source during demo development.
+      - ./app:/code/app
+      - ./llm:/code/llm
+      - ./graph:/code/graph
+      - ./rag:/code/rag
+      - ./eval:/code/eval
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

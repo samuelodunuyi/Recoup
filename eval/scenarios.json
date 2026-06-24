@@ -1,0 +1,211 @@
+[
+  {
+    "id": "new_insufficient_paystack_en",
+    "description": "Initial failure, insufficient funds, Paystack, English",
+    "context": {"customer_name": "Ada", "decline_code": "insufficient_funds", "processor": "paystack", "language": "english", "amount": 5000, "currency": "NGN"},
+    "message": "",
+    "expected": {"route": "new_failure", "action": "SEND_PAYMENT_LINK", "language": "english", "tone_notes": "warm, no blame, offers retry"}
+  },
+  {
+    "id": "new_card_declined_flutterwave_en",
+    "description": "Initial failure, card declined, Flutterwave, English",
+    "context": {"customer_name": "Tunde", "decline_code": "card_declined", "processor": "flutterwave", "language": "english", "amount": 12000, "currency": "NGN"},
+    "message": "",
+    "expected": {"route": "new_failure", "action": "SEND_PAYMENT_LINK", "language": "english", "tone_notes": "reassuring, suggests another card"}
+  },
+  {
+    "id": "new_expired_card_paystack_en",
+    "description": "Initial failure, expired card, Paystack, English",
+    "context": {"customer_name": "Bisi", "decline_code": "expired_card", "processor": "paystack", "language": "english", "amount": 3500, "currency": "NGN"},
+    "message": "",
+    "expected": {"route": "new_failure", "action": "SEND_PAYMENT_LINK", "language": "english", "tone_notes": "asks to update card"}
+  },
+  {
+    "id": "new_insufficient_pidgin",
+    "description": "Initial failure in Pidgin",
+    "context": {"customer_name": "Chidi", "decline_code": "insufficient_funds", "processor": "paystack", "language": "pidgin", "amount": 4000, "currency": "NGN"},
+    "message": "",
+    "expected": {"route": "new_failure", "action": "SEND_PAYMENT_LINK", "language": "pidgin", "tone_notes": "warm Pidgin, natural"}
+  },
+  {
+    "id": "new_mobile_money_timeout_pidgin",
+    "description": "Initial failure, mobile money timeout, Pidgin",
+    "context": {"customer_name": "Ngozi", "decline_code": "mobile_money_timeout", "processor": "mobile_money", "language": "pidgin", "amount": 2000, "currency": "GHS"},
+    "message": "",
+    "expected": {"route": "new_failure", "action": "SEND_PAYMENT_LINK", "language": "pidgin", "tone_notes": "offers to resend prompt"}
+  },
+  {
+    "id": "already_paid_en",
+    "description": "Customer claims they already paid",
+    "context": {"customer_name": "Ada", "decline_code": "insufficient_funds", "processor": "paystack", "language": "english", "amount": 5000, "currency": "NGN"},
+    "message": "I already paid this yesterday",
+    "expected": {"route": "already_paid", "action": "NONE", "language": "english", "tone_notes": "thanks them, offers to check, no pressure"}
+  },
+  {
+    "id": "already_paid_pidgin",
+    "description": "Already paid, Pidgin",
+    "context": {"customer_name": "Emeka", "decline_code": "card_declined", "processor": "flutterwave", "language": "pidgin", "amount": 8000, "currency": "NGN"},
+    "message": "I don pay am since now",
+    "expected": {"route": "already_paid", "action": "NONE", "language": "pidgin", "tone_notes": "acknowledges in Pidgin"}
+  },
+  {
+    "id": "pay_later_friday_en",
+    "description": "Customer will pay on Friday",
+    "context": {"customer_name": "Tunde", "decline_code": "insufficient_funds", "processor": "paystack", "language": "english", "amount": 6000, "currency": "NGN"},
+    "message": "I get paid Friday, I'll sort it then",
+    "expected": {"route": "pay_later", "action": "SCHEDULE_RETRY", "language": "english", "tone_notes": "captures Friday, confirms back"}
+  },
+  {
+    "id": "pay_later_payday_en",
+    "description": "Customer will pay after payday",
+    "context": {"customer_name": "Sade", "decline_code": "insufficient_funds", "processor": "flutterwave", "language": "english", "amount": 9000, "currency": "NGN"},
+    "message": "money is tight right now, after payday please",
+    "expected": {"route": "pay_later", "action": "SCHEDULE_RETRY", "language": "english", "tone_notes": "empathetic, schedules around payday"}
+  },
+  {
+    "id": "pay_later_pidgin",
+    "description": "Pay later in Pidgin",
+    "context": {"customer_name": "Chidi", "decline_code": "insufficient_funds", "processor": "paystack", "language": "pidgin", "amount": 3000, "currency": "NGN"},
+    "message": "abeg, e never reach me. Make I pay next week",
+    "expected": {"route": "pay_later", "action": "SCHEDULE_RETRY", "language": "pidgin", "tone_notes": "warm, schedules next week"}
+  },
+  {
+    "id": "pay_now_willing_en",
+    "description": "Customer wants to pay now",
+    "context": {"customer_name": "Ibrahim", "decline_code": "card_declined", "processor": "paystack", "language": "english", "amount": 7000, "currency": "NGN"},
+    "message": "yes please send me the link, I'll pay now",
+    "expected": {"route": "pay_later", "action": "SEND_PAYMENT_LINK", "language": "english", "tone_notes": "sends link promptly"}
+  },
+  {
+    "id": "dispute_why_charged_en",
+    "description": "Customer disputes the charge",
+    "context": {"customer_name": "Grace", "decline_code": "insufficient_funds", "processor": "paystack", "language": "english", "amount": 15000, "currency": "NGN"},
+    "message": "why are you even charging me? I cancelled this",
+    "expected": {"route": "dispute", "action": "ESCALATE_TO_HUMAN", "language": "english", "tone_notes": "calm, doesn't argue, offers help"}
+  },
+  {
+    "id": "dispute_unknown_charge_en",
+    "description": "Customer doesn't recognise the charge",
+    "context": {"customer_name": "Femi", "decline_code": "card_declined", "processor": "flutterwave", "language": "english", "amount": 20000, "currency": "NGN"},
+    "message": "I don't even know what this is for",
+    "expected": {"route": "dispute", "action": "ESCALATE_TO_HUMAN", "language": "english", "tone_notes": "explains subscription, offers human"}
+  },
+  {
+    "id": "needs_human_fraud_en",
+    "description": "Fraud claim -> needs human",
+    "context": {"customer_name": "Kemi", "decline_code": "card_declined", "processor": "paystack", "language": "english", "amount": 50000, "currency": "NGN"},
+    "message": "this is fraud, my card was stolen, I'm calling my lawyer",
+    "expected": {"route": "needs_human", "action": "ESCALATE_TO_HUMAN", "language": "english", "tone_notes": "de-escalates, hands off"}
+  },
+  {
+    "id": "needs_human_abuse_en",
+    "description": "Abusive message -> needs human",
+    "context": {"customer_name": "Anon", "decline_code": "insufficient_funds", "processor": "paystack", "language": "english", "amount": 5000, "currency": "NGN"},
+    "message": "stop messaging me you scammers or I'll report you",
+    "expected": {"route": "needs_human", "action": "ESCALATE_TO_HUMAN", "language": "english", "tone_notes": "polite handoff"}
+  },
+  {
+    "id": "do_not_honour_en",
+    "description": "Do not honour decline, initial",
+    "context": {"customer_name": "Uche", "decline_code": "do_not_honour", "processor": "paystack", "language": "english", "amount": 11000, "currency": "NGN"},
+    "message": "",
+    "expected": {"route": "new_failure", "action": "SEND_PAYMENT_LINK", "language": "english", "tone_notes": "suggests bank/another card"}
+  },
+  {
+    "id": "transaction_limit_en",
+    "description": "Transaction limit, mobile money",
+    "context": {"customer_name": "Yaw", "decline_code": "transaction_limit", "processor": "mobile_money", "language": "english", "amount": 30000, "currency": "GHS"},
+    "message": "",
+    "expected": {"route": "new_failure", "action": "SEND_PAYMENT_LINK", "language": "english", "tone_notes": "explains limit, offers card"}
+  },
+  {
+    "id": "pay_later_confused_then_ok_en",
+    "description": "Multi-turn: prior offer, now agrees to Friday",
+    "context": {"customer_name": "Dele", "decline_code": "insufficient_funds", "processor": "paystack", "language": "english", "amount": 6500, "currency": "NGN"},
+    "history": [
+      {"role": "agent", "content": "Hi Dele, your subscription payment didn't go through. Want me to send a fresh link, or try again on payday?"}
+    ],
+    "message": "try again Friday please",
+    "expected": {"route": "pay_later", "action": "SCHEDULE_RETRY", "language": "english", "tone_notes": "confirms Friday explicitly"}
+  },
+  {
+    "id": "honour_promise_followup_en",
+    "description": "Multi-turn: customer promised Friday, now it's Friday",
+    "context": {"customer_name": "Dele", "decline_code": "insufficient_funds", "processor": "paystack", "language": "english", "amount": 6500, "currency": "NGN", "promises": ["pay Friday"]},
+    "history": [
+      {"role": "customer", "content": "try again Friday please"},
+      {"role": "agent", "content": "No problem Dele, I'll check back Friday."}
+    ],
+    "message": "ok I'm ready now",
+    "expected": {"route": "pay_later", "action": "SEND_PAYMENT_LINK", "language": "english", "tone_notes": "references the Friday promise, sends link"}
+  },
+  {
+    "id": "already_paid_followup_en",
+    "description": "Multi-turn: after a link was sent, says paid",
+    "context": {"customer_name": "Ada", "decline_code": "insufficient_funds", "processor": "paystack", "language": "english", "amount": 5000, "currency": "NGN"},
+    "history": [
+      {"role": "agent", "content": "Hi Ada, here's a fresh link to complete your payment."}
+    ],
+    "message": "done, paid it",
+    "expected": {"route": "already_paid", "action": "NONE", "language": "english", "tone_notes": "thanks, confirms it'll reflect"}
+  },
+  {
+    "id": "new_card_declined_pidgin",
+    "description": "Initial card declined in Pidgin",
+    "context": {"customer_name": "Obi", "decline_code": "card_declined", "processor": "paystack", "language": "pidgin", "amount": 7500, "currency": "NGN"},
+    "message": "",
+    "expected": {"route": "new_failure", "action": "SEND_PAYMENT_LINK", "language": "pidgin", "tone_notes": "Pidgin, suggests another card"}
+  },
+  {
+    "id": "pay_later_vague_en",
+    "description": "Vague delay",
+    "context": {"customer_name": "Hauwa", "decline_code": "insufficient_funds", "processor": "flutterwave", "language": "english", "amount": 4500, "currency": "NGN"},
+    "message": "later",
+    "expected": {"route": "pay_later", "action": "SCHEDULE_RETRY", "language": "english", "tone_notes": "asks when, stays warm"}
+  },
+  {
+    "id": "dispute_pidgin",
+    "description": "Dispute in Pidgin",
+    "context": {"customer_name": "Musa", "decline_code": "insufficient_funds", "processor": "paystack", "language": "pidgin", "amount": 10000, "currency": "NGN"},
+    "message": "wetin be this charge? I no gree for am",
+    "expected": {"route": "dispute", "action": "ESCALATE_TO_HUMAN", "language": "pidgin", "tone_notes": "calm Pidgin, offers human"}
+  },
+  {
+    "id": "new_insufficient_flutterwave_en",
+    "description": "Initial insufficient funds, Flutterwave",
+    "context": {"customer_name": "Zainab", "decline_code": "insufficient_funds", "processor": "flutterwave", "language": "english", "amount": 5500, "currency": "NGN"},
+    "message": "",
+    "expected": {"route": "new_failure", "action": "SEND_PAYMENT_LINK", "language": "english", "tone_notes": "payday-timed retry"}
+  },
+  {
+    "id": "pay_now_pidgin",
+    "description": "Wants to pay now, Pidgin",
+    "context": {"customer_name": "Tobi", "decline_code": "card_declined", "processor": "paystack", "language": "pidgin", "amount": 3000, "currency": "NGN"},
+    "message": "send the link make I pay now now",
+    "expected": {"route": "pay_later", "action": "SEND_PAYMENT_LINK", "language": "pidgin", "tone_notes": "sends link promptly in Pidgin"}
+  },
+  {
+    "id": "expired_card_followup_en",
+    "description": "Multi-turn expired card, agrees to update",
+    "context": {"customer_name": "Bisi", "decline_code": "expired_card", "processor": "paystack", "language": "english", "amount": 3500, "currency": "NGN"},
+    "history": [
+      {"role": "agent", "content": "Hi Bisi, your card on file has expired. Want a link to update it?"}
+    ],
+    "message": "yes please",
+    "expected": {"route": "pay_later", "action": "SEND_PAYMENT_LINK", "language": "english", "tone_notes": "sends update link"}
+  },
+  {
+    "id": "needs_human_legal_pidgin",
+    "description": "Legal threat in Pidgin -> needs human",
+    "context": {"customer_name": "Ola", "decline_code": "insufficient_funds", "processor": "paystack", "language": "pidgin", "amount": 25000, "currency": "NGN"},
+    "message": "I go report una to court if una charge me again",
+    "expected": {"route": "needs_human", "action": "ESCALATE_TO_HUMAN", "language": "pidgin", "tone_notes": "de-escalates, hands off"}
+  },
+  {
+    "id": "pay_later_specific_date_en",
+    "description": "Specific future date",
+    "context": {"customer_name": "Ife", "decline_code": "insufficient_funds", "processor": "flutterwave", "language": "english", "amount": 8000, "currency": "NGN"},
+    "message": "can you try again on the 28th?",
+    "expected": {"route": "pay_later", "action": "SCHEDULE_RETRY", "language": "english", "tone_notes": "captures the 28th"}
+  }
+]

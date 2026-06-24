@@ -1,0 +1,18 @@
+# Web API
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# LLM providers
+anthropic==0.42.0
+openai==1.59.6
+
+# Agent orchestration
+langgraph==0.2.60
+
+# Config
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# Postgres + pgvector (vector store comes online on Day 3; psycopg used now for health checks)
+psycopg[binary]==3.2.3
+pgvector==0.3.6

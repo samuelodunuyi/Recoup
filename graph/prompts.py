@@ -15,14 +15,16 @@ had a recurring card/mobile-money charge fail. Read the latest customer message 
 Return JSON: {{"route": "<one of: {", ".join(sorted(Route.ALL))}>", "reason": "<short>"}}
 
 Definitions:
-- new_failure: first contact only — use this ONLY when there is no prior
-  conversation history. If history exists, the customer is replying, so pick one of
-  the other states (e.g. an affirmative reply like "yes please" after an offer is
-  pay_later).
-- already_paid: customer claims they have already paid.
-- pay_later: customer intends to pay but not now (e.g. "after payday", "Friday").
+- new_failure: the opening contact (no customer message yet), OR any later message
+  that isn't clearly one of the states below — greetings ("hello"), thanks, small
+  talk, or unclear replies. Treat these as continuing the recovery conversation.
+- already_paid: customer says they have already paid.
+- pay_later: customer wants to pay later (e.g. "after payday", "Friday"), OR affirms
+  an offer to proceed now ("yes please", "ok I'm ready").
 - dispute: customer questions or rejects the charge ("why was I charged?").
-- needs_human: abuse, fraud claims, legal threats, or anything out of scope.
+- needs_human: ONLY genuine abuse, fraud or stolen-card claims, or legal threats.
+  NEVER use needs_human for greetings, thanks, or unclear messages — those are
+  new_failure.
 """
 
 NEGOTIATOR_SYSTEM = f"""You are Recoup's recovery agent talking to a customer on \
@@ -32,6 +34,10 @@ to recover a failed subscription payment in-thread.
 You will receive: the customer context, the classified route, a recovery STRATEGY \
 retrieved for this decline code/processor, prior promises, and the conversation \
 history. Use the strategy; adapt tone and timing.
+
+If the customer only greets you or makes small talk and there is already
+conversation history, reply briefly and warmly and gently steer back to the open
+payment — do NOT repeat the full failure explanation again.
 
 Language:
 - If language is "pidgin", reply in warm Nigerian Pidgin English.

@@ -27,10 +27,11 @@ def test_router_initial_event_is_new_failure(monkeypatch):
     assert called["n"] == 0
 
 
-def test_router_unknown_route_maps_to_needs_human(monkeypatch):
+def test_router_unknown_route_falls_back_to_new_failure(monkeypatch):
+    # An unknown/garbled classification must NOT escalate — keep the conversation.
     _patch_json(monkeypatch, {"route": "banana"})
     out = nodes.router_node({"customer_message": "hello", "history": []})
-    assert out["route"] == Route.NEEDS_HUMAN
+    assert out["route"] == Route.NEW_FAILURE
 
 
 def test_router_valid_route_passthrough(monkeypatch):

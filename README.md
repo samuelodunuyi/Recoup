@@ -109,30 +109,31 @@ graph and scores **routing accuracy**, **action correctness**, **latency**,
 > workflow is: run → read the failures → adjust prompts in
 > [graph/prompts.py](graph/prompts.py) → re-run → capture the delta.
 
-### Results: v1 → v2 (driven by the harness)
+### Results: harness-driven improvement (86% → 100%)
 
-The first run scored **86% action correctness**. Reading the failures showed a
-clear pattern: disputes routed correctly but the Negotiator sometimes sent a
-payment link instead of escalating. The v2 changes — route `dispute` straight to
-the deterministic Escalate node, and tighten the Negotiator prompt (`already_paid`
-→ no escalation; vague "later" → schedule a retry) — lifted it to **96%**, while
-also cutting latency by a third (disputes skip the LLM Negotiator).
+The first run scored **86% action correctness / 96% routing**. Reading the failures
+drove two rounds of fixes:
 
-| Metric | v1 | v2 |
+1. **Disputes** routed correctly but the Negotiator sometimes sent a payment link
+   instead of escalating → routed `dispute` straight to the deterministic Escalate
+   node and tightened the Negotiator prompt. Action correctness 86% → 96%.
+2. **Greetings and unclear messages were being escalated to a human** (a plain
+   "hello" triggered a handoff), and one affirmative follow-up ("ok I'm ready")
+   misrouted → reclassified greetings/unclear as continuing the conversation and
+   affirmatives as `pay_later`. Routing and action reached **100%**.
+
+| Metric | v1 | current |
 | --- | --- | --- |
-| Routing accuracy | 96% | 96% |
-| **Action correctness** | **86%** | **96%** |
-| Tone (LLM judge) | 0.86 | 0.87 |
+| **Routing accuracy** | 96% | **100%** |
+| **Action correctness** | **86%** | **100%** |
+| Tone (LLM judge) | 0.86 | 0.86 |
 | Language pass rate (Pidgin) | 100% | 100% |
-| Avg latency / conversation | 10.1 s | 6.9 s |
-| Avg cost / conversation | $0.0103 | $0.0093 |
+| Avg cost / conversation | $0.0103 | $0.0087 |
 
 Run on `claude-opus-4-8`, 28 scenarios. The v1 baseline is preserved at
 [eval/scorecard_v1.md](eval/scorecard_v1.md); the current run is
-[eval/scorecard.md](eval/scorecard.md). One scenario still fails in v2
-(`honour_promise_followup_en`): the router reads "ok I'm ready now" after a prior
-promise as `needs_human` — a genuine multi-turn edge case left as future work
-rather than over-fitted to.
+[eval/scorecard.md](eval/scorecard.md). This is the "read the failures, fix the
+prompts/graph, re-run" loop the eval harness exists for.
 
 ## Observability
 

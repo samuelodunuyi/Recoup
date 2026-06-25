@@ -87,9 +87,17 @@
 
 <script>
 let conversationId = null;
+let busy = false;
 
 const $ = (id) => document.getElementById(id);
 const thread = $("thread");
+
+function setBusy(b) {
+  busy = b;
+  $("send").disabled = b;
+  $("start").disabled = b;
+  $("msg").disabled = b;
+}
 
 function bubble(cls, text) {
   const d = document.createElement("div");
@@ -129,14 +137,31 @@ function renderMeta(data) {
 }
 
 async function send(message) {
-  const body = { conversation_id: conversationId, message, ...context() };
-  const res = await fetch("/chat", {
-    method: "POST", headers: {"content-type":"application/json"}, body: JSON.stringify(body),
-  });
-  if (!res.ok) { bubble("sys", "Error: " + (await res.text())); return; }
-  const data = await res.json();
-  bubble("in", data.reply || "(no reply)");
-  renderMeta(data);
+  // Serialise requests: ignore overlapping sends so replies can't arrive out of order.
+  if (busy) return;
+  setBusy(true);
+  const typing = document.createElement("div");
+  typing.className = "bubble in";
+  typing.textContent = "…";
+  thread.appendChild(typing);
+  thread.scrollTop = thread.scrollHeight;
+  try {
+    const body = { conversation_id: conversationId, message, ...context() };
+    const res = await fetch("/chat", {
+      method: "POST", headers: {"content-type":"application/json"}, body: JSON.stringify(body),
+    });
+    typing.remove();
+    if (!res.ok) { bubble("sys", "Error: " + (await res.text())); return; }
+    const data = await res.json();
+    bubble("in", data.reply || "(no reply)");
+    renderMeta(data);
+  } catch (e) {
+    typing.remove();
+    bubble("sys", "Error: " + e);
+  } finally {
+    setBusy(false);
+    $("msg").focus();
+  }
 }
 
 $("start").onclick = async () => {

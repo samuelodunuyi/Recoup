@@ -84,7 +84,9 @@ def router_node(state: RecoveryState) -> dict:
     )
     route = parsed.get("route", Route.NEW_FAILURE) if isinstance(parsed, dict) else None
     if route not in Route.ALL:
-        route = Route.NEEDS_HUMAN
+        # Unknown/garbled classification → keep the customer in the conversation
+        # rather than escalating to a human (a greeting must not trigger a handoff).
+        route = Route.NEW_FAILURE
     return {"route": route}
 
 

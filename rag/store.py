@@ -78,8 +78,10 @@ def search(decline_code: str, processor: str, query: str, k: int = 3) -> list[di
     }
 
     if query_vec is not None:
-        order = "ORDER BY embedding <=> %(qv)s ASC NULLS LAST"
-        params["qv"] = query_vec
+        # Pass the query vector as a text literal and cast to `vector`, so the `<=>`
+        # operator gets a vector (a bare float list is sent as double precision[]).
+        order = "ORDER BY embedding <=> %(qv)s::vector ASC NULLS LAST"
+        params["qv"] = "[" + ",".join(str(float(x)) for x in query_vec) + "]"
     else:
         # No embeddings: code-specific chunks first, then by insertion order.
         order = "ORDER BY (decline_code = %(code)s) DESC NULLS LAST, id ASC"

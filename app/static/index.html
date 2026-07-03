@@ -154,6 +154,13 @@ async function send(message) {
     if (!res.ok) { bubble("sys", "Error: " + (await res.text())); return; }
     const data = await res.json();
     bubble("in", data.reply || "(no reply)");
+    if (data.payment_link) {
+      const b = document.createElement("div");
+      b.className = "bubble in";
+      b.innerHTML = '💳 <a href="' + data.payment_link + '" target="_blank" rel="noopener">Complete payment →</a>';
+      thread.appendChild(b);
+      thread.scrollTop = thread.scrollHeight;
+    }
     renderMeta(data);
   } catch (e) {
     typing.remove();

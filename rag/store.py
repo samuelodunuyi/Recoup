@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import logging
 
-from pgvector.psycopg import register_vector
-
 from app import db
 from rag.embeddings import embed_text
 
@@ -18,9 +16,8 @@ logger = logging.getLogger("recoup.rag")
 
 
 def _conn():
-    conn = db.connect()
-    register_vector(conn)
-    return conn
+    # The connection pool already registers the pgvector adapters (db._configure).
+    return db.connect()
 
 
 def count() -> int:

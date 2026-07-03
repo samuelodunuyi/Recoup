@@ -163,6 +163,11 @@ def escalate_node(state: RecoveryState) -> dict:
 
 
 # ─── Node 4: Memory ─────────────────────────────────────────────────────────
+# Cap retained turns so long conversations don't grow the prompt / stored state
+# unbounded. Promises persist separately, so older commitments aren't lost.
+_MAX_HISTORY_MESSAGES = 20
+
+
 @traced
 def memory_node(state: RecoveryState) -> dict:
     """Append this turn to history and record any captured promise."""
@@ -171,6 +176,7 @@ def memory_node(state: RecoveryState) -> dict:
         history.append({"role": "customer", "content": state["customer_message"]})
     if state.get("reply"):
         history.append({"role": "agent", "content": state["reply"]})
+    history = history[-_MAX_HISTORY_MESSAGES:]  # keep only the most recent turns
 
     promises = list(state.get("promises") or [])
     promise = (state.get("action") or {}).get("promise")

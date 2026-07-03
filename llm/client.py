@@ -15,6 +15,7 @@ import inspect
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Protocol
@@ -222,6 +223,9 @@ class LLMClient:
                 raise ValueError(f"unknown provider {name!r}")
             self._providers.append(cls(self._settings))
         self._costs: dict[str, _ConversationCost] = {}
+        # FastAPI runs sync endpoints in a threadpool, so the shared cost report can
+        # be mutated concurrently — guard it.
+        self._lock = threading.Lock()
 
     def complete(
         self,
@@ -255,15 +259,32 @@ class LLMClient:
         )
 
     def _record(self, conversation_id: str, result: LLMResult) -> None:
-        """Log the call as structured JSON and accumulate cost by conversation."""
-        logger.info(json.dumps({"conversation_id": conversation_id, **asdict(result)}))
+        """Log call metadata as structured JSON and accumulate cost by conversation.
 
-        bucket = self._costs.setdefault(conversation_id, _ConversationCost())
-        bucket.total_cost_usd += result.cost_usd
-        bucket.by_provider[result.provider] = (
-            bucket.by_provider.get(result.provider, 0.0) + result.cost_usd
+        The model's generated text is deliberately NOT logged — it can contain
+        customer PII. Only token counts, latency, and cost are recorded.
+        """
+        logger.info(
+            json.dumps(
+                {
+                    "conversation_id": conversation_id,
+                    "provider": result.provider,
+                    "model": result.model,
+                    "prompt_tokens": result.prompt_tokens,
+                    "completion_tokens": result.completion_tokens,
+                    "latency_ms": round(result.latency_ms, 1),
+                    "cost_usd": result.cost_usd,
+                }
+            )
         )
-        bucket.calls += 1
+
+        with self._lock:
+            bucket = self._costs.setdefault(conversation_id, _ConversationCost())
+            bucket.total_cost_usd += result.cost_usd
+            bucket.by_provider[result.provider] = (
+                bucket.by_provider.get(result.provider, 0.0) + result.cost_usd
+            )
+            bucket.calls += 1
 
     def complete_json(
         self,
@@ -290,7 +311,8 @@ class LLMClient:
 
     def cost_report(self, conversation_id: str | None = None) -> dict:
         """Total cost per conversation and per provider (brief §4's tiny report)."""
-        if conversation_id is not None:
-            bucket = self._costs.get(conversation_id, _ConversationCost())
-            return {"conversation_id": conversation_id, **asdict(bucket)}
-        return {cid: asdict(bucket) for cid, bucket in self._costs.items()}
+        with self._lock:
+            if conversation_id is not None:
+                bucket = self._costs.get(conversation_id, _ConversationCost())
+                return {"conversation_id": conversation_id, **asdict(bucket)}
+            return {cid: asdict(bucket) for cid, bucket in self._costs.items()}

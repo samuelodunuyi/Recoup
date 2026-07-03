@@ -29,11 +29,14 @@ def _result(provider="anthropic", cost=0.001):
 
 
 def _client_with(providers):
+    import threading
+
     c = LLMClient.__new__(LLMClient)          # bypass __init__ (no real SDKs)
     from app.config import get_settings
     c._settings = get_settings()
     c._providers = providers
     c._costs = {}
+    c._lock = threading.Lock()
     return c
 
 

@@ -4,10 +4,16 @@ The RAG store (`playbook_chunks`) lives here too but is read/written by `rag/`.
 """
 
 import json
+import logging
 
-import psycopg
+from pgvector.psycopg import register_vector
+from psycopg_pool import ConnectionPool
 
 from app.config import get_settings
+
+logger = logging.getLogger("recoup.db")
+
+_pool: ConnectionPool | None = None
 
 
 def enabled() -> bool:
@@ -16,12 +22,41 @@ def enabled() -> bool:
     return bool(get_settings().database_url.strip())
 
 
-def connect() -> psycopg.Connection:
-    # prepare_threshold=None disables server-side prepared statements, which keeps
-    # us compatible with connection poolers like Supabase's (PgBouncer).
-    return psycopg.connect(
-        get_settings().database_url, connect_timeout=5, prepare_threshold=None
-    )
+def _configure(conn) -> None:
+    # Register the pgvector adapters on each pooled connection. The extension may
+    # not exist yet on a brand-new DB (init_schema creates it) — ignore if so.
+    try:
+        register_vector(conn)
+    except Exception as exc:
+        logger.debug("register_vector skipped (extension not ready?): %s", exc)
+
+
+def _get_pool() -> ConnectionPool:
+    global _pool
+    if _pool is None:
+        # min_size=0 so a briefly-unavailable DB doesn't block process startup;
+        # prepare_threshold=None keeps us compatible with poolers (Supabase/PgBouncer).
+        _pool = ConnectionPool(
+            get_settings().database_url,
+            min_size=0,
+            max_size=10,
+            kwargs={"prepare_threshold": None, "connect_timeout": 10},
+            configure=_configure,
+            open=True,
+        )
+    return _pool
+
+
+def connect():
+    """Context manager yielding a pooled connection (returned to the pool on exit)."""
+    return _get_pool().connection()
+
+
+def close_pool() -> None:
+    global _pool
+    if _pool is not None:
+        _pool.close()
+        _pool = None
 
 
 def ping() -> bool:

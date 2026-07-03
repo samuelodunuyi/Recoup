@@ -61,6 +61,15 @@ def test_negotiator_non_dict_parsed_is_safe(monkeypatch):
     assert out["action"]["type"] == Action.NONE
 
 
+def test_memory_caps_history_length():
+    # A long history must be truncated to the most recent turns.
+    long_history = [{"role": "agent", "content": f"m{i}"} for i in range(40)]
+    state = {"customer_message": "hi", "reply": "hello", "action": {}, "history": long_history, "promises": []}
+    out = nodes.memory_node(state)
+    assert len(out["history"]) == nodes._MAX_HISTORY_MESSAGES
+    assert out["history"][-1]["content"] == "hello"  # newest kept
+
+
 def test_memory_captures_promise_and_history():
     state = {
         "customer_message": "I'll pay Friday",

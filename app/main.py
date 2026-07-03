@@ -7,7 +7,9 @@ before the LangGraph agent exists.
 """
 
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -20,32 +22,35 @@ from llm import LLMError, get_client
 
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="Recoup", version="0.1.0")
-
 _STATIC_DIR = Path(__file__).parent / "static"
-
-
-@app.get("/")
-def demo_ui() -> FileResponse:
-    """Serve the fake-WhatsApp demo thread."""
-    return FileResponse(_STATIC_DIR / "index.html")
 
 # Shared process-wide client — the same instance the graph nodes use, so the
 # cost report reflects calls made inside the graph.
 llm_client = get_client()
 
 
-@app.on_event("startup")
-def _startup() -> None:
-    """Bootstrap the DB schema (idempotent) so memory + RAG tables exist."""
-    if not db.enabled():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup/shutdown: bootstrap the DB schema and tear down the pool."""
+    if db.enabled():
+        try:
+            db.init_schema()
+        except Exception as exc:  # don't block startup if DB is briefly unavailable
+            logging.warning("startup: schema init failed: %s", exc)
+    else:
         logging.info("DATABASE_URL not set — running without persistence/RAG store "
                      "(memory off, retrieval uses built-in strategies)")
-        return
-    try:
-        db.init_schema()
-    except Exception as exc:  # don't block startup if DB is briefly unavailable
-        logging.warning("startup: schema init failed: %s", exc)
+    yield
+    db.close_pool()
+
+
+app = FastAPI(title="Recoup", version="0.1.0", lifespan=lifespan)
+
+
+@app.get("/")
+def demo_ui() -> FileResponse:
+    """Serve the fake-WhatsApp demo thread."""
+    return FileResponse(_STATIC_DIR / "index.html")
 
 
 @app.get("/health")
@@ -96,16 +101,30 @@ def llm_cost() -> dict:
     return llm_client.cost_report()
 
 
+# Validated enums — invalid values now return a clear 422 instead of odd behaviour.
+DeclineCode = Literal[
+    "insufficient_funds", "card_declined", "expired_card",
+    "do_not_honour", "transaction_limit", "mobile_money_timeout",
+]
+Processor = Literal["paystack", "flutterwave", "mobile_money"]
+Language = Literal["english", "pidgin", "spanish", "french", "swahili"]
+
+
 class ChatRequest(BaseModel):
     conversation_id: str
     message: str = ""               # empty = initial failed-payment event
     # Context for a new conversation (ignored if the conversation already exists).
     customer_name: str = "there"
-    decline_code: str = "insufficient_funds"
-    processor: str = "paystack"
-    language: str = "english"       # "english" | "pidgin"
+    decline_code: DeclineCode = "insufficient_funds"
+    processor: Processor = "paystack"
+    language: Language = "english"
     amount: float = 0.0
     currency: str = "NGN"
+
+
+def _payment_link(conversation_id: str) -> str:
+    """Demo payment link. In production this is a real Paystack/Flutterwave URL."""
+    return f"https://pay.recoup.africa/{conversation_id}"
 
 
 @app.post("/chat")
@@ -150,10 +169,17 @@ def chat(req: ChatRequest) -> dict:
     except Exception as exc:
         logging.warning("chat: could not persist memory: %s", exc)
 
+    action = result.get("action") or {}
+    payment_link = (
+        _payment_link(req.conversation_id)
+        if action.get("type") == "SEND_PAYMENT_LINK"
+        else None
+    )
     return {
         "reply": result.get("reply", ""),
         "route": result.get("route"),
-        "action": result.get("action"),
+        "action": action,
+        "payment_link": payment_link,
         "promises": result.get("promises", []),
         "strategy_sources": result.get("strategy_sources", []),
         "cost": llm_client.cost_report(req.conversation_id),

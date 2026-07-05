@@ -24,6 +24,7 @@ import anthropic
 import openai
 
 from app.config import Settings, get_settings
+from app.context import request_id_var
 
 logger = logging.getLogger("recoup.llm")
 
@@ -300,8 +301,14 @@ class LLMClient:
             "completion_tokens": result.completion_tokens,
             "latency_ms": round(result.latency_ms, 1),
             "cost_usd": result.cost_usd,
+            "request_id": request_id_var.get(),
         }
         logger.info(json.dumps(rec))
+        # #18 alert on an unexpectedly expensive single call.
+        if result.cost_usd > self._settings.max_cost_per_call:
+            logger.warning("call cost $%.4f exceeds per-call cap $%.4f (%s/%s)",
+                           result.cost_usd, self._settings.max_cost_per_call,
+                           result.provider, result.model)
         if self._sink is not None:
             try:
                 self._sink(rec)

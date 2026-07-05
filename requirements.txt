@@ -9,6 +9,9 @@ openai==1.59.6
 # Agent orchestration
 langgraph==0.2.60
 
+# Optional error tracking (activated only when SENTRY_DSN is set)
+sentry-sdk==2.19.2
+
 # Config
 pydantic==2.10.4
 pydantic-settings==2.7.1
@@ -17,3 +20,6 @@ pydantic-settings==2.7.1
 psycopg[binary]==3.2.3
 psycopg-pool==3.2.4
 pgvector==0.3.6
+
+# Migrations
+alembic==1.14.0

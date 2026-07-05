@@ -6,6 +6,7 @@ provider abstraction, fallback, and cost logging — is demo-able in a browser
 before the LangGraph agent exists.
 """
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -17,12 +18,13 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from app import db, notify
 from app.auth import rate_limit, require_api_key
 from app.config import get_settings
+from app.context import request_id_var
 from graph import run_turn
 from graph.actions import Action
 from llm import LLMError, get_client
@@ -36,19 +38,44 @@ _STATIC_DIR = Path(__file__).parent / "static"
 llm_client = get_client()
 
 
+async def _retention_loop(days: int) -> None:
+    """Daily data-retention purge (#12)."""
+    while True:
+        await asyncio.sleep(24 * 3600)
+        try:
+            result = await asyncio.to_thread(db.purge_old_data, days)
+            logging.info("retention purge: %s", result)
+        except Exception as exc:
+            logging.warning("retention purge failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup/shutdown: bootstrap the DB schema and tear down the pool."""
+    """Startup/shutdown: error tracking, DB schema, retention job, pool teardown."""
+    settings = get_settings()
+    if settings.sentry_dsn:  # #13 optional error tracking
+        try:
+            import sentry_sdk
+            sentry_sdk.init(dsn=settings.sentry_dsn, traces_sample_rate=0.1)
+            logging.info("Sentry error tracking enabled")
+        except Exception as exc:
+            logging.warning("Sentry init failed: %s", exc)
+
+    tasks = []
     if db.enabled():
         try:
             db.init_schema()
             llm_client.set_sink(db.record_llm_call)  # #11 persist calls for observability
         except Exception as exc:  # don't block startup if DB is briefly unavailable
             logging.warning("startup: schema init failed: %s", exc)
+        if settings.data_retention_days > 0:
+            tasks.append(asyncio.create_task(_retention_loop(settings.data_retention_days)))
     else:
         logging.info("DATABASE_URL not set — running without persistence/RAG store "
                      "(memory off, retrieval uses built-in strategies)")
     yield
+    for t in tasks:
+        t.cancel()
     db.close_pool()
 
 
@@ -57,9 +84,13 @@ app = FastAPI(title="Recoup", version="0.1.0", lifespan=lifespan)
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    """Reliability (#23): tag every request with an id for traceable logs."""
+    """Reliability (#23/#13): tag every request with an id that flows into logs."""
     request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
-    response = await call_next(request)
+    token = request_id_var.set(request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        request_id_var.reset(token)
     response.headers["x-request-id"] = request_id
     return response
 
@@ -78,13 +109,23 @@ def dashboard_ui() -> FileResponse:
 
 @app.get("/health")
 def health() -> dict:
-    """Liveness for the app and its database."""
+    """Liveness — the process is up (does not depend on the DB)."""
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+def ready() -> JSONResponse:
+    """Readiness (#14): DB reachable and at least one provider key configured."""
+    s = get_settings()
     try:
-        db_ok = db.ping()
-    except Exception as exc:  # surface DB connectivity without crashing the probe
+        db_ok = db.ping() if db.enabled() else True
+    except Exception:
         db_ok = False
-        logging.warning("health: db ping failed: %s", exc)
-    return {"status": "ok", "database": "ok" if db_ok else "unavailable"}
+    provider_ok = bool(s.anthropic_api_key or s.openai_api_key)
+    is_ready = db_ok and provider_ok
+    body = {"ready": is_ready, "database": "ok" if db_ok else "unavailable",
+            "providers": "ok" if provider_ok else "unconfigured"}
+    return JSONResponse(body, status_code=200 if is_ready else 503)
 
 
 class PingRequest(BaseModel):
@@ -268,6 +309,28 @@ def handoffs() -> dict:
 def metrics() -> dict:
     """Observability metrics aggregated from persisted LLM calls (#11)."""
     return db.metrics()
+
+
+@app.get("/metrics/prometheus", dependencies=[Depends(require_api_key)])
+def metrics_prometheus() -> PlainTextResponse:
+    """Prometheus exposition of the same aggregates (#13, pull-based export)."""
+    m = db.metrics()
+    o = db.outcome_stats()
+    lines = [
+        "# TYPE recoup_llm_calls_total counter",
+        f"recoup_llm_calls_total {m.get('llm_calls', 0)}",
+        "# TYPE recoup_llm_cost_usd_total counter",
+        f"recoup_llm_cost_usd_total {m.get('total_cost_usd', 0)}",
+        "# TYPE recoup_avg_latency_ms gauge",
+        f"recoup_avg_latency_ms {m.get('avg_latency_ms', 0)}",
+        "# TYPE recoup_handoffs_total counter",
+        f"recoup_handoffs_total {m.get('handoffs', 0)}",
+        "# TYPE recoup_recovery_rate gauge",
+        f"recoup_recovery_rate {o.get('recovery_rate', 0)}",
+    ]
+    for provider, stats in (m.get("by_provider") or {}).items():
+        lines.append(f'recoup_llm_calls_by_provider{{provider="{provider}"}} {stats["calls"]}')
+    return PlainTextResponse("\n".join(lines) + "\n")
 
 
 Outcome = Literal["recovered", "scheduled", "escalated", "lost", "pending"]

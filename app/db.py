@@ -188,6 +188,16 @@ def init_schema() -> None:
             )
             """
         )
+        # Indexes (#11): keep lookups/aggregations fast as tables grow.
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_conv ON llm_calls (conversation_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_created ON llm_calls (created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_handoffs_created ON handoffs (created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_outcome ON outcomes (outcome)")
+        # Approximate-nearest-neighbour index for vector search (cosine = the <=> op).
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_playbook_embedding ON playbook_chunks "
+            "USING hnsw (embedding vector_cosine_ops)"
+        )
         conn.commit()
 
 

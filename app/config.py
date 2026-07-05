@@ -40,6 +40,18 @@ class Settings(BaseSettings):
     # Webhook HMAC secret for /events/* (empty = signature check skipped in demo).
     webhook_secret: str = ""
 
+    # Per-call cost alert threshold (USD) — logs a warning above this (#18).
+    max_cost_per_call: float = 0.10
+
+    # Optional content moderation on customer input (#17). Uses OpenAI moderations.
+    enable_moderation: bool = False
+
+    # Data retention: purge records older than N days (0 = disabled) (#12).
+    data_retention_days: int = 0
+
+    # Observability: optional Sentry error tracking (#13).
+    sentry_dsn: str = ""
+
     # Human handoff email (SMTP). Empty smtp_host = email disabled (handoffs still
     # recorded to the DB). Use a Gmail App Password for smtp_password if using Gmail.
     handoff_email: str = "samuelodunuyi@gmail.com"

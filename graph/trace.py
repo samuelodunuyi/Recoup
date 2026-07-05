@@ -13,6 +13,8 @@ import json
 import logging
 import time
 
+from app.context import request_id_var
+
 logger = logging.getLogger("recoup.trace")
 
 
@@ -28,6 +30,7 @@ def traced(fn):
                     "event": "node",
                     "node": fn.__name__,
                     "run_id": state.get("run_id"),
+                    "request_id": request_id_var.get(),
                     "conversation_id": state.get("conversation_id"),
                     "duration_ms": round(duration_ms, 1),
                 }

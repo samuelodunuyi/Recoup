@@ -49,6 +49,23 @@ async def _retention_loop(days: int) -> None:
             logging.warning("retention purge failed: %s", exc)
 
 
+async def _seed_rag_if_empty() -> None:
+    """One-time: load the knowledge base if the RAG store is empty, so a fresh
+    deploy has semantic retrieval without a manual `python -m rag.ingest` step.
+    Runs in the background; requests before it finishes fall back to built-in
+    strategies."""
+    try:
+        from rag import store
+        from rag.ingest import ingest
+
+        if await asyncio.to_thread(store.count) == 0:
+            logging.info("RAG store empty — seeding knowledge base in background...")
+            n = await asyncio.to_thread(ingest)
+            logging.info("RAG store seeded with %d chunks", n)
+    except Exception as exc:
+        logging.warning("RAG auto-seed skipped: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown: error tracking, DB schema, retention job, pool teardown."""
@@ -68,6 +85,7 @@ async def lifespan(app: FastAPI):
             llm_client.set_sink(db.record_llm_call)  # #11 persist calls for observability
         except Exception as exc:  # don't block startup if DB is briefly unavailable
             logging.warning("startup: schema init failed: %s", exc)
+        tasks.append(asyncio.create_task(_seed_rag_if_empty()))  # auto-seed on first deploy
         if settings.data_retention_days > 0:
             tasks.append(asyncio.create_task(_retention_loop(settings.data_retention_days)))
     else:

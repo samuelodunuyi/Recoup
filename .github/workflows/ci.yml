@@ -8,6 +8,21 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: recoup
+          POSTGRES_PASSWORD: recoup
+          POSTGRES_DB: recoup
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U recoup"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # Integration tests (tests/test_integration.py) run against this DB.
+      DATABASE_URL: postgresql://recoup:recoup@localhost:5432/recoup
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,5 +31,5 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
-      - name: Run tests
+      - name: Run tests (unit + integration)
         run: pytest -q

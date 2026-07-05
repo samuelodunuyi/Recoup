@@ -190,8 +190,12 @@ Beyond the core demo, the following are implemented:
 
 | Area | What | Where |
 | --- | --- | --- |
-| Reliability | Connection pool, request-id middleware, idempotent inbound webhook, graceful errors | `app/db.py`, `app/main.py` |
-| Safety | Prompt-injection guard → human handoff; per-conversation spend cap | `graph/safety.py`, `app/main.py` |
+| Reliability | Pooling (health-checked), retry/backoff + provider fallback, JSON-truncation retry, per-turn timeout, request-id tracing, idempotent + HMAC-verified webhook | `llm/client.py`, `app/db.py`, `app/main.py` |
+| Auth | `X-API-Key` on write/admin endpoints, per-IP rate limit | `app/auth.py` |
+| Safety | Prompt-injection guard + optional OpenAI moderation → handoff; per-conversation spend cap (DB-backed); action-schema validation | `graph/safety.py`, `graph/actions.py`, `app/main.py` |
+| Concurrency | Per-conversation advisory lock so parallel turns don't clobber memory | `app/db.py` |
+| Migrations & scale | Alembic migrations; indexes incl. pgvector HNSW; scheduled retention purge | `migrations/`, `app/db.py` |
+| Health & metrics | `/health` (liveness), `/ready` (readiness), `/metrics` (JSON), `/metrics/prometheus`, optional Sentry | `app/main.py` |
 | Human handoff | Every escalation recorded to a `handoffs` queue (`GET /handoffs`); SMTP email when configured | `app/notify.py`, `app/db.py` |
 | Observability | Per-call metadata persisted (`llm_calls`); `GET /metrics` aggregates cost/latency/provider | `app/db.py` |
 | Feedback loop | Record conversation outcomes (`POST /outcome`); fold winning strategies back into RAG (`POST /playbook`) | `app/main.py` |
@@ -209,10 +213,11 @@ Beyond the core demo, the following are implemented:
   queue to actually re-attempt charges at payday-timed moments.
 - **Vector DB scaling.** pgvector is right for this size; at scale I'd add an IVFFlat/
   HNSW index and consider a dedicated vector DB.
-- **Auth/multi-tenancy.** Endpoints are open for the demo; production needs API-key
-  auth, rate limiting, and per-merchant isolation.
-- **Eval coverage.** 28 scenarios is a credible start; production would grow the set
-  from real (anonymised) conversations with regression gating in CI.
+- **Multi-tenancy.** API-key auth and rate limiting exist, but there's no per-merchant
+  isolation, onboarding, or billing yet.
+- **Eval coverage.** 28 scenarios is a credible start (now gated nightly in CI via
+  `.github/workflows/eval.yml`); production would grow the set from real (anonymised)
+  conversations.
 
 ## Deploying (Render blueprint)
 

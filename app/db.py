@@ -95,7 +95,109 @@ def init_schema() -> None:
             )
             """
         )
+        # Human-handoff queue (#18): every escalation is recorded here.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS handoffs (
+                id              SERIAL PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                customer_name   TEXT,
+                reason          TEXT,
+                last_message    TEXT,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+        # Observability (#11): one row per LLM call (metadata only, no message text).
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_calls (
+                id                SERIAL PRIMARY KEY,
+                conversation_id   TEXT,
+                provider          TEXT,
+                model             TEXT,
+                prompt_tokens     INT,
+                completion_tokens INT,
+                latency_ms        REAL,
+                cost_usd          DOUBLE PRECISION,
+                created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
         conn.commit()
+
+
+def record_handoff(conversation_id: str, customer_name: str, reason: str,
+                   last_message: str) -> None:
+    if not enabled():
+        return
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO handoffs (conversation_id, customer_name, reason, last_message)
+               VALUES (%s, %s, %s, %s)""",
+            (conversation_id, customer_name, reason, last_message),
+        )
+        conn.commit()
+
+
+def list_handoffs(limit: int = 50) -> list[dict]:
+    if not enabled():
+        return []
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT conversation_id, customer_name, reason, last_message, created_at
+               FROM handoffs ORDER BY created_at DESC LIMIT %s""",
+            (limit,),
+        )
+        cols = ("conversation_id", "customer_name", "reason", "last_message", "created_at")
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def record_llm_call(rec: dict) -> None:
+    """Persist one LLM call's metadata (wired as the client's cost sink)."""
+    if not enabled():
+        return
+    try:
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO llm_calls
+                   (conversation_id, provider, model, prompt_tokens, completion_tokens,
+                    latency_ms, cost_usd)
+                   VALUES (%(conversation_id)s, %(provider)s, %(model)s, %(prompt_tokens)s,
+                           %(completion_tokens)s, %(latency_ms)s, %(cost_usd)s)""",
+                rec,
+            )
+            conn.commit()
+    except Exception as exc:  # observability must never break the request path
+        logger.warning("record_llm_call failed: %s", exc)
+
+
+def metrics() -> dict:
+    """Aggregate observability metrics from persisted LLM calls."""
+    if not enabled():
+        return {"enabled": False}
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT count(*), coalesce(sum(cost_usd),0), coalesce(avg(latency_ms),0),
+                      count(DISTINCT conversation_id)
+               FROM llm_calls"""
+        )
+        calls, cost, avg_latency, convos = cur.fetchone()
+        cur.execute(
+            "SELECT provider, count(*), coalesce(sum(cost_usd),0) FROM llm_calls GROUP BY provider"
+        )
+        by_provider = {p: {"calls": c, "cost_usd": round(float(s), 6)} for p, c, s in cur.fetchall()}
+        cur.execute("SELECT count(*) FROM handoffs")
+        handoffs = cur.fetchone()[0]
+    return {
+        "enabled": True,
+        "llm_calls": calls,
+        "conversations": convos,
+        "total_cost_usd": round(float(cost), 6),
+        "avg_latency_ms": round(float(avg_latency), 1),
+        "by_provider": by_provider,
+        "handoffs": handoffs,
+    }
 
 
 def load_conversation(conversation_id: str) -> dict | None:

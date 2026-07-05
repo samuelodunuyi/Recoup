@@ -27,6 +27,18 @@ class Settings(BaseSettings):
     # Storage.
     database_url: str = "postgresql://recoup:recoup@localhost:5432/recoup"
 
+    # Safety: refuse to keep spending on one conversation past this (USD).
+    max_cost_per_conversation: float = 0.50
+
+    # Human handoff email (SMTP). Empty smtp_host = email disabled (handoffs still
+    # recorded to the DB). Use a Gmail App Password for smtp_password if using Gmail.
+    handoff_email: str = "samuelodunuyi@gmail.com"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "recoup@localhost"
+
     # App.
     demo_mode: bool = True
 

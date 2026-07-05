@@ -226,6 +226,12 @@ class LLMClient:
         # FastAPI runs sync endpoints in a threadpool, so the shared cost report can
         # be mutated concurrently — guard it.
         self._lock = threading.Lock()
+        # Optional persistence hook (set by the app) receiving per-call metadata.
+        self._sink = None
+
+    def set_sink(self, sink) -> None:
+        """Register a callable(record: dict) to persist each call's metadata."""
+        self._sink = sink
 
     def complete(
         self,
@@ -264,19 +270,21 @@ class LLMClient:
         The model's generated text is deliberately NOT logged — it can contain
         customer PII. Only token counts, latency, and cost are recorded.
         """
-        logger.info(
-            json.dumps(
-                {
-                    "conversation_id": conversation_id,
-                    "provider": result.provider,
-                    "model": result.model,
-                    "prompt_tokens": result.prompt_tokens,
-                    "completion_tokens": result.completion_tokens,
-                    "latency_ms": round(result.latency_ms, 1),
-                    "cost_usd": result.cost_usd,
-                }
-            )
-        )
+        rec = {
+            "conversation_id": conversation_id,
+            "provider": result.provider,
+            "model": result.model,
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "latency_ms": round(result.latency_ms, 1),
+            "cost_usd": result.cost_usd,
+        }
+        logger.info(json.dumps(rec))
+        if self._sink is not None:
+            try:
+                self._sink(rec)
+            except Exception as exc:  # persistence must not break the call path
+                logger.warning("cost sink failed: %s", exc)
 
         with self._lock:
             bucket = self._costs.setdefault(conversation_id, _ConversationCost())

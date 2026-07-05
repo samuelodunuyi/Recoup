@@ -15,9 +15,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app import db
+from app import db, notify
 from app.config import get_settings
 from graph import run_turn
+from graph.actions import Action
 from llm import LLMError, get_client
 
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +36,7 @@ async def lifespan(app: FastAPI):
     if db.enabled():
         try:
             db.init_schema()
+            llm_client.set_sink(db.record_llm_call)  # #11 persist calls for observability
         except Exception as exc:  # don't block startup if DB is briefly unavailable
             logging.warning("startup: schema init failed: %s", exc)
     else:
@@ -154,6 +156,21 @@ def chat(req: ChatRequest) -> dict:
 
     state["customer_message"] = req.message
 
+    # Safety (#21): stop spending on a runaway conversation.
+    settings = get_settings()
+    spent = llm_client.cost_report(req.conversation_id).get("total_cost_usd", 0.0)
+    if spent >= settings.max_cost_per_conversation:
+        logging.warning("conversation %s hit spend cap ($%.4f)", req.conversation_id, spent)
+        _handoff(req.conversation_id, state.get("customer_name", "there"),
+                 "spend_cap", req.message)
+        return {
+            "reply": "Thanks — let me bring in a teammate to help you finish this up.",
+            "route": "needs_human",
+            "action": {"type": Action.ESCALATE_TO_HUMAN},
+            "payment_link": None, "promises": state.get("promises", []),
+            "strategy_sources": [], "cost": llm_client.cost_report(req.conversation_id),
+        }
+
     try:
         result = run_turn(state)
     except LLMError as exc:
@@ -170,6 +187,11 @@ def chat(req: ChatRequest) -> dict:
         logging.warning("chat: could not persist memory: %s", exc)
 
     action = result.get("action") or {}
+    # #18 record a human handoff (+ optional email) whenever we escalate.
+    if action.get("type") == Action.ESCALATE_TO_HUMAN:
+        _handoff(req.conversation_id, result.get("customer_name", "there"),
+                 result.get("route", "escalation"), req.message)
+
     payment_link = (
         _payment_link(req.conversation_id)
         if action.get("type") == "SEND_PAYMENT_LINK"
@@ -184,3 +206,24 @@ def chat(req: ChatRequest) -> dict:
         "strategy_sources": result.get("strategy_sources", []),
         "cost": llm_client.cost_report(req.conversation_id),
     }
+
+
+def _handoff(conversation_id: str, customer_name: str, reason: str, message: str) -> None:
+    """Record a human handoff to the DB and try to email it (best-effort)."""
+    try:
+        db.record_handoff(conversation_id, customer_name, reason, message)
+    except Exception as exc:
+        logging.warning("could not record handoff: %s", exc)
+    notify.send_handoff_email(conversation_id, customer_name, reason, message)
+
+
+@app.get("/handoffs")
+def handoffs() -> dict:
+    """Recent human-handoff queue (#18)."""
+    return {"handoffs": db.list_handoffs()}
+
+
+@app.get("/metrics")
+def metrics() -> dict:
+    """Observability metrics aggregated from persisted LLM calls (#11)."""
+    return db.metrics()

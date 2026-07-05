@@ -37,6 +37,7 @@ def _client_with(providers):
     c._providers = providers
     c._costs = {}
     c._lock = threading.Lock()
+    c._sink = None
     return c
 
 

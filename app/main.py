@@ -6,8 +6,12 @@ provider abstraction, fallback, and cost logging — is demo-able in a browser
 before the LangGraph agent exists.
 """
 
+import hashlib
+import hmac
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -146,6 +150,10 @@ def _payment_link(conversation_id: str) -> str:
     return f"https://pay.recoup.africa/{conversation_id}"
 
 
+# Bounded worker pool so a turn can be given a hard deadline (#8).
+_TURN_EXECUTOR = ThreadPoolExecutor(max_workers=8)
+
+
 @app.post("/chat", dependencies=[Depends(rate_limit)])
 def chat(req: ChatRequest) -> dict:
     """Run one turn of the recovery graph, persisting memory across turns."""
@@ -154,7 +162,12 @@ def chat(req: ChatRequest) -> dict:
         if not acquired:
             raise HTTPException(status_code=409,
                                 detail="a message for this conversation is already being processed")
-        return _run_chat(req)
+        # #8 hard deadline on the turn so a hung provider can't pin the request.
+        future = _TURN_EXECUTOR.submit(_run_chat, req)
+        try:
+            return future.result(timeout=get_settings().request_timeout_seconds)
+        except FuturesTimeout:
+            raise HTTPException(status_code=504, detail="recovery turn timed out")
 
 
 def _run_chat(req: "ChatRequest") -> dict:
@@ -313,12 +326,27 @@ class PaymentEvent(BaseModel):
 
 
 @app.post("/events/payment-failed", dependencies=[Depends(rate_limit)])
-def payment_failed(evt: PaymentEvent) -> dict:
-    """Idempotent inbound failed-payment webhook (#23).
+async def payment_failed(request: Request) -> dict:
+    """Idempotent, signature-verified failed-payment webhook (#23, #9).
 
-    In production this is called by Paystack/Flutterwave. Duplicate deliveries
+    In production this is called by Paystack/Flutterwave. When WEBHOOK_SECRET is set,
+    the request body is HMAC-SHA512 verified (Paystack-style). Duplicate deliveries
     (same event_id) are ignored so a retry can't start two recovery threads.
     """
+    body = await request.body()
+    secret = get_settings().webhook_secret
+    if secret:
+        signature = (request.headers.get("x-signature")
+                     or request.headers.get("x-paystack-signature") or "")
+        expected = hmac.new(secret.encode(), body, hashlib.sha512).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise HTTPException(status_code=401, detail="invalid webhook signature")
+
+    try:
+        evt = PaymentEvent.model_validate_json(body)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"invalid event payload: {exc}") from exc
+
     if db.already_processed(evt.event_id):
         return {"ok": True, "duplicate": True}
     db.mark_processed(evt.event_id)

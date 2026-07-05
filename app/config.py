@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     # Request tuning.
     llm_max_tokens: int = 1024
     llm_timeout_seconds: float = 30.0
+    llm_max_retries: int = 2          # retries per provider on transient errors (#5)
+    request_timeout_seconds: float = 60.0  # hard cap on a /chat turn (#8)
 
     # Storage.
     database_url: str = "postgresql://recoup:recoup@localhost:5432/recoup"

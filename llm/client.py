@@ -61,6 +61,7 @@ class LLMResult:
     completion_tokens: int
     latency_ms: float
     cost_usd: float
+    stop_reason: str = ""  # "end_turn"/"max_tokens"/"stop"/"length" — used to detect truncation
 
 
 class LLMError(RuntimeError):
@@ -139,6 +140,7 @@ class AnthropicProvider:
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             cost_usd=_cost_usd(self._model, prompt_tokens, completion_tokens),
+            stop_reason=response.stop_reason or "",
         )
 
 
@@ -178,6 +180,7 @@ class OpenAIProvider:
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             cost_usd=_cost_usd(self._model, prompt_tokens, completion_tokens),
+            stop_reason=response.choices[0].finish_reason or "",
         )
 
 
@@ -199,6 +202,15 @@ def get_client() -> "LLMClient":
 
 # Provider SDK errors that should trigger a fallback rather than crash the call.
 _FALLBACK_ERRORS = (anthropic.APIError, openai.APIError, TimeoutError)
+
+# Transient errors worth retrying on the SAME provider before falling over (#5).
+_RETRYABLE_ERRORS = (
+    anthropic.RateLimitError, anthropic.APITimeoutError,
+    anthropic.InternalServerError, anthropic.APIConnectionError,
+    openai.RateLimitError, openai.APITimeoutError,
+    openai.InternalServerError, openai.APIConnectionError,
+    TimeoutError,
+)
 
 
 # ─── Client ─────────────────────────────────────────────────────────────────
@@ -242,22 +254,32 @@ class LLMClient:
         conversation_id: str = "default",
         thinking: bool = True,
     ) -> LLMResult:
-        """Generate a reply, trying each provider in order until one succeeds."""
+        """Generate a reply. Retries transient errors per provider (with backoff),
+        then falls over to the next provider; raises only if all fail."""
         max_tokens = max_tokens or self._settings.llm_max_tokens
+        max_retries = self._settings.llm_max_retries
         errors: list[str] = []
 
         for provider in self._providers:
-            try:
-                result = provider.generate(system, messages, max_tokens, thinking)
-            except _FALLBACK_ERRORS as exc:
-                errors.append(f"{provider.name}: {type(exc).__name__}: {exc}")
-                logger.warning(
-                    "provider %s failed, trying fallback: %s", provider.name, exc
-                )
-                continue
-
-            self._record(conversation_id, result)
-            return result
+            for attempt in range(max_retries + 1):
+                try:
+                    result = provider.generate(system, messages, max_tokens, thinking)
+                except _RETRYABLE_ERRORS as exc:
+                    if attempt < max_retries:
+                        backoff = 0.5 * (2 ** attempt)
+                        logger.warning("provider %s transient error (retry %d in %.1fs): %s",
+                                       provider.name, attempt + 1, backoff, exc)
+                        time.sleep(backoff)
+                        continue
+                    errors.append(f"{provider.name}: {type(exc).__name__}: {exc}")
+                    break  # exhausted retries — fall over to next provider
+                except _FALLBACK_ERRORS as exc:  # non-transient — fall over immediately
+                    errors.append(f"{provider.name}: {type(exc).__name__}: {exc}")
+                    logger.warning("provider %s failed, trying fallback: %s", provider.name, exc)
+                    break
+                else:
+                    self._record(conversation_id, result)
+                    return result
 
         raise LLMError(
             f"all providers failed for conversation {conversation_id!r}: "
@@ -308,14 +330,26 @@ class LLMClient:
         format) keeps the path identical across Anthropic and OpenAI, so fallback
         stays uniform. Returns (parsed_dict, raw_result).
         """
+        sys_json = system + "\n\nRespond ONLY with a single valid JSON object."
+        base_tokens = max_tokens or self._settings.llm_max_tokens
         result = self.complete(
-            system=system + "\n\nRespond ONLY with a single valid JSON object.",
-            messages=messages,
-            max_tokens=max_tokens,
-            conversation_id=conversation_id,
-            thinking=False,  # short structured output — don't spend the budget thinking
+            system=sys_json, messages=messages, max_tokens=base_tokens,
+            conversation_id=conversation_id, thinking=False,
         )
-        return _extract_json(result.text), result
+        try:
+            return _extract_json(result.text), result
+        except LLMError:
+            # #6: if the reply was truncated (hit the token cap), retry once with a
+            # bigger budget before giving up.
+            if result.stop_reason in ("max_tokens", "length"):
+                logger.warning("JSON reply truncated (%s); retrying with more tokens",
+                               result.stop_reason)
+                result = self.complete(
+                    system=sys_json, messages=messages, max_tokens=base_tokens * 3,
+                    conversation_id=conversation_id, thinking=False,
+                )
+                return _extract_json(result.text), result
+            raise
 
     def cost_report(self, conversation_id: str | None = None) -> dict:
         """Total cost per conversation and per provider (brief §4's tiny report)."""

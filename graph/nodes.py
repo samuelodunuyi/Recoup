@@ -12,6 +12,7 @@ import logging
 from graph import prompts
 from graph.actions import Action, Route, empty_action
 from graph.state import RecoveryState
+from graph.safety import flag_injection
 from graph.trace import traced
 from llm import get_client
 
@@ -67,6 +68,12 @@ def router_node(state: RecoveryState) -> dict:
     # Initial failed-payment event (no customer message) is always a new failure.
     if not state.get("customer_message"):
         return {"route": Route.NEW_FAILURE}
+
+    # Safety (#21): obvious prompt-injection attempts go straight to a human.
+    if flag_injection(state["customer_message"]):
+        logger.warning("possible prompt injection; escalating conversation %s",
+                       state.get("conversation_id"))
+        return {"route": Route.NEEDS_HUMAN}
 
     # Give the classifier recent history so short follow-ups ("ok, I'm ready now")
     # are routed in context rather than in isolation.
@@ -147,6 +154,30 @@ _ESCALATION_REPLY = {
     ("dispute", "pidgin"): (
         "I sabi say this charge dey worry you. Make I connect you with our team "
         "wey go check am well well and sort am out for you, no wahala."
+    ),
+    ("default", "spanish"): (
+        "Gracias por avisarnos. Voy a pasar esto a un miembro de nuestro equipo "
+        "que se pondrá en contacto contigo muy pronto."
+    ),
+    ("dispute", "spanish"): (
+        "Entiendo tu preocupación por este cargo. Deja que te ponga en contacto con "
+        "alguien de nuestro equipo que pueda revisarlo y resolverlo."
+    ),
+    ("default", "french"): (
+        "Merci de nous avoir prévenus. Je transmets ceci à un membre de notre équipe "
+        "qui vous recontactera très bientôt."
+    ),
+    ("dispute", "french"): (
+        "Je comprends votre inquiétude concernant ce prélèvement. Je vous mets en "
+        "relation avec un membre de notre équipe qui pourra l'examiner et le résoudre."
+    ),
+    ("default", "swahili"): (
+        "Asante kwa kutujulisha. Nitampa mtu wa timu yetu suala hili, "
+        "atawasiliana nawe hivi karibuni."
+    ),
+    ("dispute", "swahili"): (
+        "Naelewa wasiwasi wako kuhusu malipo haya. Nitakuunganisha na mtu wa timu "
+        "yetu atakayeliangalia na kulitatua."
     ),
 }
 

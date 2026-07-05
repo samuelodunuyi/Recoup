@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Recoup — analytics</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:-apple-system,Segoe UI,Roboto,sans-serif; background:#f6f7f9; color:#1a1f24; }
+    header { background:#075e54; color:#fff; padding:18px 24px; }
+    header h1 { margin:0; font-size:18px; }
+    header a { color:#cfeee7; font-size:13px; text-decoration:none; }
+    main { max-width:960px; margin:24px auto; padding:0 16px; }
+    .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:14px; }
+    .tile { background:#fff; border:1px solid #e6e9ec; border-radius:12px; padding:16px; }
+    .tile .label { font-size:12px; color:#6b7580; text-transform:uppercase; letter-spacing:.04em; }
+    .tile .value { font-size:26px; font-weight:700; margin-top:6px; }
+    .tile .sub { font-size:12px; color:#8a929b; margin-top:2px; }
+    section { background:#fff; border:1px solid #e6e9ec; border-radius:12px; padding:18px; margin-top:18px; }
+    section h2 { margin:0 0 14px; font-size:14px; }
+    .bar-row { display:flex; align-items:center; gap:10px; margin-bottom:8px; font-size:13px; }
+    .bar-row .name { width:90px; color:#4a545e; text-transform:capitalize; }
+    .bar-track { flex:1; background:#eef1f3; border-radius:6px; height:18px; overflow:hidden; }
+    .bar-fill { height:100%; border-radius:6px; }
+    .bar-row .n { width:36px; text-align:right; color:#4a545e; }
+    .muted { color:#8a929b; font-size:13px; }
+    .refresh { float:right; font-size:12px; background:#fff; border:1px solid #cfd6db; border-radius:16px; padding:5px 12px; cursor:pointer; }
+    @media (prefers-color-scheme: dark) {
+      body { background:#12151a; color:#e6eaee; }
+      .tile, section { background:#1b2027; border-color:#2a313a; }
+      .bar-track { background:#2a313a; }
+      .tile .value { color:#fff; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Recoup — analytics <a href="/">← demo</a></h1>
+  </header>
+  <main>
+    <button class="refresh" onclick="load()">Refresh</button>
+    <div class="tiles" id="tiles"></div>
+    <section>
+      <h2>Recovery funnel</h2>
+      <div id="funnel"><p class="muted">Loading…</p></div>
+    </section>
+    <section>
+      <h2>LLM spend by provider</h2>
+      <div id="providers"><p class="muted">Loading…</p></div>
+    </section>
+  </main>
+
+<script>
+// Semantic, colour-blind-safe hues; consistent across light/dark.
+const OUTCOME_COLORS = {
+  recovered:"#2e9e6b", scheduled:"#3b82c4", escalated:"#d9962a",
+  lost:"#c2534d", pending:"#8a929b"
+};
+const PROVIDER_COLORS = { anthropic:"#7a5cc4", openai:"#2e9e6b" };
+
+function tile(label, value, sub) {
+  return `<div class="tile"><div class="label">${label}</div>
+    <div class="value">${value}</div><div class="sub">${sub||""}</div></div>`;
+}
+function bars(obj, colors) {
+  const max = Math.max(1, ...Object.values(obj).map(v => typeof v==="object"?v.calls:v));
+  return Object.entries(obj).map(([k,v]) => {
+    const n = typeof v==="object" ? v.calls : v;
+    const w = Math.round((n/max)*100);
+    const c = colors[k] || "#8a929b";
+    return `<div class="bar-row"><span class="name">${k}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${w}%;background:${c}"></span></span>
+      <span class="n">${n}</span></div>`;
+  }).join("") || '<p class="muted">No data yet.</p>';
+}
+
+async function load() {
+  const d = await (await fetch("/dashboard/data")).json();
+  const m = d.metrics || {}, o = d.outcomes || {};
+  document.getElementById("tiles").innerHTML =
+    tile("Recovery rate", ((o.recovery_rate||0)*100).toFixed(0)+"%", `${o.total||0} conversations`) +
+    tile("Revenue recovered", "₦"+(o.revenue_recovered||0).toLocaleString(), "from recovered outcomes") +
+    tile("LLM cost", "$"+(m.total_cost_usd||0).toFixed(4), `${m.llm_calls||0} calls`) +
+    tile("Avg latency", (m.avg_latency_ms||0).toFixed(0)+" ms", "per LLM call") +
+    tile("Handoffs", m.handoffs||0, "escalated to a human");
+  document.getElementById("funnel").innerHTML = bars(o.by_outcome||{}, OUTCOME_COLORS);
+  document.getElementById("providers").innerHTML = bars(m.by_provider||{}, PROVIDER_COLORS);
+}
+load();
+</script>
+</body>
+</html>

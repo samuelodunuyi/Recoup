@@ -30,3 +30,25 @@ def flag_injection(text: str) -> bool:
     if not text:
         return False
     return any(p.search(text) for p in _COMPILED)
+
+
+def moderate(text: str) -> bool:
+    """Return True if OpenAI moderation flags the text (harassment, self-harm, etc.).
+
+    Opt-in via ENABLE_MODERATION (#17); best-effort — returns False on any error so
+    moderation never breaks the conversation.
+    """
+    from app.config import get_settings
+
+    s = get_settings()
+    if not (s.enable_moderation and s.openai_api_key and text):
+        return False
+    try:
+        import openai
+
+        result = openai.OpenAI(api_key=s.openai_api_key).moderations.create(
+            model="omni-moderation-latest", input=text
+        )
+        return bool(result.results[0].flagged)
+    except Exception:
+        return False

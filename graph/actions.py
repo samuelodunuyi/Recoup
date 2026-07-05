@@ -6,6 +6,8 @@ surrounding system can act on it deterministically — brief §2, point 3.
 
 from __future__ import annotations
 
+from pydantic import BaseModel, ConfigDict, field_validator
+
 
 class Route:
     """Classifier outputs — the conversational state of the customer."""
@@ -32,3 +34,36 @@ class Action:
 
 def empty_action() -> dict:
     return {"type": Action.NONE, "schedule_for": None, "promise": None}
+
+
+class ActionModel(BaseModel):
+    """Schema-validates the Negotiator's structured action (#16). Unknown fields are
+    dropped; an out-of-set type becomes NONE; non-string fields are coerced."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    type: str = Action.NONE
+    schedule_for: str | None = None
+    promise: str | None = None
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _valid_type(cls, v: object) -> str:
+        return v if v in Action.ALL else Action.NONE
+
+    @field_validator("schedule_for", "promise", mode="before")
+    @classmethod
+    def _stringify(cls, v: object) -> str | None:
+        return None if v is None else str(v)
+
+
+def validate_action(raw: object) -> dict:
+    """Coerce whatever the model produced into a valid action dict."""
+    if isinstance(raw, str):
+        raw = {"type": raw}
+    elif not isinstance(raw, dict):
+        raw = {}
+    try:
+        return ActionModel(**raw).model_dump()
+    except Exception:
+        return empty_action()

@@ -10,9 +10,9 @@ from __future__ import annotations
 import logging
 
 from graph import prompts
-from graph.actions import Action, Route, empty_action
+from graph.actions import Action, Route, validate_action
 from graph.state import RecoveryState
-from graph.safety import flag_injection
+from graph.safety import flag_injection, moderate
 from graph.trace import traced
 from llm import get_client
 
@@ -69,9 +69,10 @@ def router_node(state: RecoveryState) -> dict:
     if not state.get("customer_message"):
         return {"route": Route.NEW_FAILURE}
 
-    # Safety (#21): obvious prompt-injection attempts go straight to a human.
-    if flag_injection(state["customer_message"]):
-        logger.warning("possible prompt injection; escalating conversation %s",
+    # Safety (#21, #17): prompt-injection attempts and moderation-flagged content
+    # (when enabled) go straight to a human.
+    if flag_injection(state["customer_message"]) or moderate(state["customer_message"]):
+        logger.warning("safety guard triggered; escalating conversation %s",
                        state.get("conversation_id"))
         return {"route": Route.NEEDS_HUMAN}
 
@@ -122,18 +123,8 @@ def negotiator_node(state: RecoveryState) -> dict:
     if not isinstance(parsed, dict):
         parsed = {}
     reply = parsed.get("reply", "") if isinstance(parsed.get("reply"), str) else ""
-
-    # The model sometimes returns `action` as a bare string instead of an object —
-    # coerce it so a malformed reply never crashes the node.
-    raw = parsed.get("action")
-    if isinstance(raw, dict):
-        action = {**empty_action(), **raw}
-    elif isinstance(raw, str):
-        action = {**empty_action(), "type": raw}
-    else:
-        action = empty_action()
-    if action.get("type") not in Action.ALL:
-        action["type"] = Action.NONE
+    # #16 schema-validate the structured action (coerces bad/partial output safely).
+    action = validate_action(parsed.get("action"))
     return {"reply": reply, "action": action}
 
 

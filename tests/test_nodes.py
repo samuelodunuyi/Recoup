@@ -91,6 +91,17 @@ def test_escalation_localises_by_language():
     assert "team" in english
 
 
+def test_validate_action_coerces_bad_output():
+    from graph.actions import Action, validate_action
+    # bare string
+    assert validate_action("SEND_PAYMENT_LINK")["type"] == Action.SEND_PAYMENT_LINK
+    # invalid type + extra fields dropped, non-str coerced
+    a = validate_action({"type": "NONSENSE", "schedule_for": 5, "junk": 1})
+    assert a["type"] == Action.NONE and a["schedule_for"] == "5" and "junk" not in a
+    # non-dict/non-str
+    assert validate_action(["x"])["type"] == Action.NONE
+
+
 def test_router_escalates_prompt_injection(monkeypatch):
     # Even if the classifier would say otherwise, injection forces a human handoff.
     _patch_json(monkeypatch, {"route": "pay_later"})

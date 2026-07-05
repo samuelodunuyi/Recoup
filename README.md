@@ -184,27 +184,48 @@ All via `.env` (see [.env.example](.env.example)):
   eval harness reports cost-per-conversation alongside accuracy — the basis for a
   truthful "v1 scored X% at $Y/conversation, v2 scored Z%" story.
 
+## Production features
+
+Beyond the core demo, the following are implemented:
+
+| Area | What | Where |
+| --- | --- | --- |
+| Reliability | Connection pool, request-id middleware, idempotent inbound webhook, graceful errors | `app/db.py`, `app/main.py` |
+| Safety | Prompt-injection guard → human handoff; per-conversation spend cap | `graph/safety.py`, `app/main.py` |
+| Human handoff | Every escalation recorded to a `handoffs` queue (`GET /handoffs`); SMTP email when configured | `app/notify.py`, `app/db.py` |
+| Observability | Per-call metadata persisted (`llm_calls`); `GET /metrics` aggregates cost/latency/provider | `app/db.py` |
+| Feedback loop | Record conversation outcomes (`POST /outcome`); fold winning strategies back into RAG (`POST /playbook`) | `app/main.py` |
+| Analytics | Dashboard at `/dashboard` (recovery rate, revenue recovered, cost, funnel) | `app/static/dashboard.html` |
+| Localisation | English, Nigerian Pidgin, Spanish, French, Swahili | `graph/prompts.py` |
+| PII/compliance | Generated text kept out of logs; data-retention purge; posture in [COMPLIANCE.md](COMPLIANCE.md) | `llm/client.py`, `app/db.py` |
+| Testing/CI | 21 pytest tests run in GitHub Actions | `tests/`, `.github/workflows/ci.yml` |
+
 ## Known limitations / what I'd do for production
 
-- **Synthetic data, demo mode.** No live Paystack/Flutterwave/WhatsApp webhooks
-  yet; the payment link is a placeholder the system would attach for real.
-- **Cost report is in-process memory.** A real deployment would persist call logs
-  to a store and dashboard them.
+- **Synthetic data, demo mode.** The failed-payment webhook and payment link are
+  scaffolded but not wired to live Paystack/Flutterwave; WhatsApp is a browser
+  stand-in for the Business API.
+- **Retry engine.** `SCHEDULE_RETRY` records intent; a production system needs a job
+  queue to actually re-attempt charges at payday-timed moments.
 - **Vector DB scaling.** pgvector is right for this size; at scale I'd add an IVFFlat/
   HNSW index and consider a dedicated vector DB.
-- **PII handling and safety monitoring.** Customer messages and memory would need
-  PII redaction, retention policies, and an abuse/jailbreak monitor before
-  production.
-- **Eval coverage.** 28 scenarios is a credible start; production would grow the
-  set from real (anonymised) conversations and add regression gating in CI.
+- **Auth/multi-tenancy.** Endpoints are open for the demo; production needs API-key
+  auth, rate limiting, and per-merchant isolation.
+- **Eval coverage.** 28 scenarios is a credible start; production would grow the set
+  from real (anonymised) conversations with regression gating in CI.
 
-## Deploying
+## Deploying (Render blueprint)
 
-The stack is containerised. To deploy to Railway / Render / Fly:
+A [`render.yaml`](render.yaml) blueprint provisions the web service **and** a free
+Postgres (with `pgvector`):
 
-1. Provision a Postgres with the `pgvector` extension (or run the bundled
-   `pgvector/pgvector` image).
-2. Set `DATABASE_URL` and the provider keys as environment variables.
-3. Deploy the `app` image (the `Dockerfile` runs uvicorn on `$PORT` 8000).
-4. Run `python -m rag.ingest` once against the deployed DB to load the knowledge
-   base.
+1. Push this repo to GitHub.
+2. In Render: **New + → Blueprint**, select the repo. It reads `render.yaml`.
+3. Set `ANTHROPIC_API_KEY` (and optionally `OPENAI_API_KEY`) in the dashboard —
+   they're marked `sync:false` so they're never committed.
+4. After the first deploy, open the service **Shell** and run once:
+   `python -m rag.ingest` to load the knowledge base.
+5. Health check: `GET /health`. Demo: `/`. Dashboard: `/dashboard`.
+
+A `Procfile` is included for Railway/Fly/Heroku-style platforms; the `Dockerfile`
++ `docker-compose.yml` work for any container host.

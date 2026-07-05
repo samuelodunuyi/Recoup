@@ -1,0 +1,34 @@
+# Render blueprint (#1). Deploy: push to GitHub, then in Render
+# "New +" → "Blueprint" → pick this repo. Set ANTHROPIC_API_KEY / OPENAI_API_KEY
+# in the dashboard (marked sync:false so they aren't committed). After first deploy,
+# run the ingest once from the service shell:  python -m rag.ingest
+services:
+  - type: web
+    name: recoup
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: recoup-db
+          property: connectionString
+      - key: LLM_PRIMARY
+        value: anthropic
+      - key: LLM_FALLBACK
+        value: openai
+      - key: ANTHROPIC_MODEL
+        value: claude-opus-4-8
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+
+databases:
+  - name: recoup-db
+    plan: free
+    postgresMajorVersion: "16"

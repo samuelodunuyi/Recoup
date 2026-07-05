@@ -7,11 +7,12 @@ before the LangGraph agent exists.
 """
 
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -49,10 +50,25 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Recoup", version="0.1.0", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Reliability (#23): tag every request with an id for traceable logs."""
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    response = await call_next(request)
+    response.headers["x-request-id"] = request_id
+    return response
+
+
 @app.get("/")
 def demo_ui() -> FileResponse:
     """Serve the fake-WhatsApp demo thread."""
     return FileResponse(_STATIC_DIR / "index.html")
+
+
+@app.get("/dashboard")
+def dashboard_ui() -> FileResponse:
+    """Analytics dashboard (#20)."""
+    return FileResponse(_STATIC_DIR / "dashboard.html")
 
 
 @app.get("/health")
@@ -227,3 +243,71 @@ def handoffs() -> dict:
 def metrics() -> dict:
     """Observability metrics aggregated from persisted LLM calls (#11)."""
     return db.metrics()
+
+
+Outcome = Literal["recovered", "scheduled", "escalated", "lost", "pending"]
+
+
+class OutcomeRequest(BaseModel):
+    conversation_id: str
+    outcome: Outcome
+    amount: float = 0.0
+    currency: str = "NGN"
+
+
+@app.post("/outcome")
+def record_outcome(req: OutcomeRequest) -> dict:
+    """Feedback loop (#24): record how a conversation ended."""
+    db.record_outcome(req.conversation_id, req.outcome, req.amount, req.currency)
+    return {"ok": True, "stats": db.outcome_stats()}
+
+
+class LearnedStrategy(BaseModel):
+    content: str
+    decline_code: str | None = None
+    processor: str | None = None
+
+
+@app.post("/playbook")
+def add_learned_strategy(req: LearnedStrategy) -> dict:
+    """Feedback loop (#24): fold a winning strategy back into the RAG playbook."""
+    from rag.embeddings import embed_text
+    from rag import store
+    chunk = {
+        "content": req.content,
+        "decline_code": req.decline_code,
+        "processor": req.processor,
+        "source": "learned",
+        "embedding": embed_text(req.content),
+    }
+    store.add_chunks([chunk])
+    return {"ok": True, "chunks": store.count()}
+
+
+@app.get("/dashboard/data")
+def dashboard_data() -> dict:
+    """Aggregates behind the analytics dashboard (#20)."""
+    return {"metrics": db.metrics(), "outcomes": db.outcome_stats()}
+
+
+class PaymentEvent(BaseModel):
+    event_id: str            # processor's unique event id (for idempotency)
+    conversation_id: str
+    customer_name: str = "there"
+    decline_code: DeclineCode = "insufficient_funds"
+    processor: Processor = "paystack"
+    amount: float = 0.0
+    currency: str = "NGN"
+
+
+@app.post("/events/payment-failed")
+def payment_failed(evt: PaymentEvent) -> dict:
+    """Idempotent inbound failed-payment webhook (#23).
+
+    In production this is called by Paystack/Flutterwave. Duplicate deliveries
+    (same event_id) are ignored so a retry can't start two recovery threads.
+    """
+    if db.already_processed(evt.event_id):
+        return {"ok": True, "duplicate": True}
+    db.mark_processed(evt.event_id)
+    return {"ok": True, "duplicate": False, "conversation_id": evt.conversation_id}

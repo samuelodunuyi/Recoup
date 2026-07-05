@@ -124,7 +124,102 @@ def init_schema() -> None:
             )
             """
         )
+        # Feedback loop (#24): the outcome of each conversation.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS outcomes (
+                conversation_id TEXT PRIMARY KEY,
+                outcome         TEXT NOT NULL,
+                amount          DOUBLE PRECISION DEFAULT 0,
+                currency        TEXT,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+        # Reliability (#23): idempotency ledger for inbound events/webhooks.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS processed_events (
+                event_id     TEXT PRIMARY KEY,
+                processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
         conn.commit()
+
+
+def record_outcome(conversation_id: str, outcome: str, amount: float = 0.0,
+                   currency: str = "NGN") -> None:
+    if not enabled():
+        return
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO outcomes (conversation_id, outcome, amount, currency)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (conversation_id)
+               DO UPDATE SET outcome = EXCLUDED.outcome, amount = EXCLUDED.amount,
+                             currency = EXCLUDED.currency, created_at = now()""",
+            (conversation_id, outcome, amount, currency),
+        )
+        conn.commit()
+
+
+def outcome_stats() -> dict:
+    """Recovery funnel + revenue recovered (#24)."""
+    if not enabled():
+        return {"enabled": False}
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT outcome, count(*) FROM outcomes GROUP BY outcome")
+        by_outcome = {o: c for o, c in cur.fetchall()}
+        cur.execute("SELECT coalesce(sum(amount),0) FROM outcomes WHERE outcome='recovered'")
+        revenue = float(cur.fetchone()[0])
+    total = sum(by_outcome.values())
+    recovered = by_outcome.get("recovered", 0)
+    return {
+        "enabled": True,
+        "total": total,
+        "by_outcome": by_outcome,
+        "recovery_rate": round(recovered / total, 3) if total else 0.0,
+        "revenue_recovered": round(revenue, 2),
+    }
+
+
+def already_processed(event_id: str) -> bool:
+    """Idempotency check for inbound events (#23)."""
+    if not enabled():
+        return False
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM processed_events WHERE event_id = %s", (event_id,))
+        return cur.fetchone() is not None
+
+
+def mark_processed(event_id: str) -> None:
+    if not enabled():
+        return
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO processed_events (event_id) VALUES (%s) ON CONFLICT DO NOTHING",
+            (event_id,),
+        )
+        conn.commit()
+
+
+def purge_old_data(days: int) -> dict:
+    """Data-retention (#22): delete records older than `days`. Returns row counts."""
+    if not enabled():
+        return {"enabled": False}
+    deleted = {}
+    with connect() as conn, conn.cursor() as cur:
+        for table in ("llm_calls", "conversations", "handoffs", "outcomes", "processed_events"):
+            col = "updated_at" if table == "conversations" else \
+                  "processed_at" if table == "processed_events" else "created_at"
+            cur.execute(
+                f"DELETE FROM {table} WHERE {col} < now() - make_interval(days => %s)",
+                (days,),
+            )
+            deleted[table] = cur.rowcount
+        conn.commit()
+    return {"enabled": True, "deleted": deleted}
 
 
 def record_handoff(conversation_id: str, customer_name: str, reason: str,

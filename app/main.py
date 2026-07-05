@@ -12,11 +12,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app import db, notify
+from app.auth import rate_limit, require_api_key
 from app.config import get_settings
 from graph import run_turn
 from graph.actions import Action
@@ -145,9 +146,18 @@ def _payment_link(conversation_id: str) -> str:
     return f"https://pay.recoup.africa/{conversation_id}"
 
 
-@app.post("/chat")
+@app.post("/chat", dependencies=[Depends(rate_limit)])
 def chat(req: ChatRequest) -> dict:
     """Run one turn of the recovery graph, persisting memory across turns."""
+    # Serialise concurrent turns for this conversation so memory isn't clobbered (#3).
+    with db.conversation_lock(req.conversation_id) as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409,
+                                detail="a message for this conversation is already being processed")
+        return _run_chat(req)
+
+
+def _run_chat(req: "ChatRequest") -> dict:
     prior = None
     try:
         prior = db.load_conversation(req.conversation_id)
@@ -172,9 +182,11 @@ def chat(req: ChatRequest) -> dict:
 
     state["customer_message"] = req.message
 
-    # Safety (#21): stop spending on a runaway conversation.
+    # Safety (#21): stop spending on a runaway conversation. Use persisted spend
+    # (global across workers) when a DB is present, else the in-process report (#2).
     settings = get_settings()
-    spent = llm_client.cost_report(req.conversation_id).get("total_cost_usd", 0.0)
+    spent = (db.conversation_cost(req.conversation_id) if db.enabled()
+             else llm_client.cost_report(req.conversation_id).get("total_cost_usd", 0.0))
     if spent >= settings.max_cost_per_conversation:
         logging.warning("conversation %s hit spend cap ($%.4f)", req.conversation_id, spent)
         _handoff(req.conversation_id, state.get("customer_name", "there"),
@@ -233,13 +245,13 @@ def _handoff(conversation_id: str, customer_name: str, reason: str, message: str
     notify.send_handoff_email(conversation_id, customer_name, reason, message)
 
 
-@app.get("/handoffs")
+@app.get("/handoffs", dependencies=[Depends(require_api_key), Depends(rate_limit)])
 def handoffs() -> dict:
     """Recent human-handoff queue (#18)."""
     return {"handoffs": db.list_handoffs()}
 
 
-@app.get("/metrics")
+@app.get("/metrics", dependencies=[Depends(require_api_key), Depends(rate_limit)])
 def metrics() -> dict:
     """Observability metrics aggregated from persisted LLM calls (#11)."""
     return db.metrics()
@@ -255,7 +267,7 @@ class OutcomeRequest(BaseModel):
     currency: str = "NGN"
 
 
-@app.post("/outcome")
+@app.post("/outcome", dependencies=[Depends(require_api_key), Depends(rate_limit)])
 def record_outcome(req: OutcomeRequest) -> dict:
     """Feedback loop (#24): record how a conversation ended."""
     db.record_outcome(req.conversation_id, req.outcome, req.amount, req.currency)
@@ -268,7 +280,7 @@ class LearnedStrategy(BaseModel):
     processor: str | None = None
 
 
-@app.post("/playbook")
+@app.post("/playbook", dependencies=[Depends(require_api_key), Depends(rate_limit)])
 def add_learned_strategy(req: LearnedStrategy) -> dict:
     """Feedback loop (#24): fold a winning strategy back into the RAG playbook."""
     from rag.embeddings import embed_text
@@ -284,7 +296,7 @@ def add_learned_strategy(req: LearnedStrategy) -> dict:
     return {"ok": True, "chunks": store.count()}
 
 
-@app.get("/dashboard/data")
+@app.get("/dashboard/data", dependencies=[Depends(rate_limit)])
 def dashboard_data() -> dict:
     """Aggregates behind the analytics dashboard (#20)."""
     return {"metrics": db.metrics(), "outcomes": db.outcome_stats()}
@@ -300,7 +312,7 @@ class PaymentEvent(BaseModel):
     currency: str = "NGN"
 
 
-@app.post("/events/payment-failed")
+@app.post("/events/payment-failed", dependencies=[Depends(rate_limit)])
 def payment_failed(evt: PaymentEvent) -> dict:
     """Idempotent inbound failed-payment webhook (#23).
 

@@ -3,6 +3,8 @@
 The RAG store (`playbook_chunks`) lives here too but is read/written by `rag/`.
 """
 
+import contextlib
+import hashlib
 import json
 import logging
 
@@ -14,6 +16,12 @@ from app.config import get_settings
 logger = logging.getLogger("recoup.db")
 
 _pool: ConnectionPool | None = None
+
+
+def _advisory_key(conversation_id: str) -> int:
+    """Stable signed 63-bit int for pg advisory locks."""
+    h = hashlib.sha1(conversation_id.encode()).digest()[:8]
+    return int.from_bytes(h, "big") & 0x7FFFFFFFFFFFFFFF
 
 
 def enabled() -> bool:
@@ -42,6 +50,7 @@ def _get_pool() -> ConnectionPool:
             max_size=10,
             kwargs={"prepare_threshold": None, "connect_timeout": 10},
             configure=_configure,
+            check=ConnectionPool.check_connection,  # validate before handing out (#7)
             open=True,
         )
     return _pool
@@ -50,6 +59,40 @@ def _get_pool() -> ConnectionPool:
 def connect():
     """Context manager yielding a pooled connection (returned to the pool on exit)."""
     return _get_pool().connection()
+
+
+@contextlib.contextmanager
+def conversation_lock(conversation_id: str):
+    """Serialise concurrent turns for one conversation via a pg advisory lock (#3).
+
+    Yields True if the lock was acquired, False if another turn holds it. The lock
+    is held on a dedicated pooled connection for the duration of the turn.
+    """
+    if not enabled():
+        yield True
+        return
+    key = _advisory_key(conversation_id)
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
+        got = cur.fetchone()[0]
+        try:
+            yield got
+        finally:
+            if got:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (key,))
+                conn.commit()
+
+
+def conversation_cost(conversation_id: str) -> float:
+    """Total spend on a conversation from persisted calls — global across workers (#2)."""
+    if not enabled():
+        return 0.0
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT coalesce(sum(cost_usd), 0) FROM llm_calls WHERE conversation_id = %s",
+            (conversation_id,),
+        )
+        return float(cur.fetchone()[0])
 
 
 def close_pool() -> None:

@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     # Safety: refuse to keep spending on one conversation past this (USD).
     max_cost_per_conversation: float = 0.50
 
+    # Auth: when set, protected (write/admin) endpoints require this X-API-Key.
+    # Empty = open (demo). Rate limit is requests/minute per client IP.
+    recoup_api_key: str = ""
+    rate_limit_per_minute: int = 60
+
+    # Webhook HMAC secret for /events/* (empty = signature check skipped in demo).
+    webhook_secret: str = ""
+
     # Human handoff email (SMTP). Empty smtp_host = email disabled (handoffs still
     # recorded to the DB). Use a Gmail App Password for smtp_password if using Gmail.
     handoff_email: str = "samuelodunuyi@gmail.com"

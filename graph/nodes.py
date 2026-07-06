@@ -205,4 +205,8 @@ def memory_node(state: RecoveryState) -> dict:
     if promise and promise not in promises:
         promises.append(promise)
 
-    return {"history": history, "promises": promises}
+    # Remember once a payment link has been sent, so we don't re-send it every turn.
+    link_sent = bool(state.get("link_sent")) or \
+        (state.get("action") or {}).get("type") == Action.SEND_PAYMENT_LINK
+
+    return {"history": history, "promises": promises, "link_sent": link_sent}

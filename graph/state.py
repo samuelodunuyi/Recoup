@@ -34,3 +34,4 @@ class RecoveryState(TypedDict, total=False):
     strategy_sources: list[str]
     reply: str                 # text to send back to the customer
     action: dict               # structured action (see actions.py)
+    link_sent: bool            # whether a payment link has already been sent this convo

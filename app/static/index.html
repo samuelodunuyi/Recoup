@@ -25,6 +25,7 @@
     .row { display:flex; gap:8px; margin-bottom:8px; }
     .row label { flex:1; font-size:12px; color:#444; display:flex; flex-direction:column; gap:3px; }
     .row select, .row input { padding:6px; border:1px solid #ccc; border-radius:6px; font-size:13px; }
+    .note { font-size:12px; color:#5a6570; background:#f3f7f6; border-left:3px solid var(--wa-green); padding:8px 10px; border-radius:4px; margin:12px 0 0; line-height:1.45; }
     .meta { font-size:13px; margin-top:14px; border-top:1px solid #eee; padding-top:12px; }
     .meta div { margin-bottom:6px; }
     .tag { display:inline-block; background:#eef; color:#225; border-radius:4px; padding:1px 6px; font-size:12px; }
@@ -74,10 +75,17 @@
           <select id="language">
             <option>english</option>
             <option>pidgin</option>
+            <option>spanish</option>
+            <option>french</option>
+            <option>swahili</option>
           </select>
         </label>
       </div>
-      <button id="start">Start new failed-payment thread</button>
+      <button id="start">Simulate another failed payment</button>
+      <p class="note">This simulates a Paystack/Flutterwave webhook: a subscription
+        charge just failed, so the agent messages the customer <em>first</em>.
+        You're the customer — just reply below. Change the scenario above and click
+        the button to try another.</p>
 
       <div class="meta" id="meta">
         <div class="muted">Last turn details appear here.</div>
@@ -171,17 +179,19 @@ async function send(message) {
   }
 }
 
-$("start").onclick = async () => {
+// Simulate the processor webhook: a charge failed, so the agent reaches out first.
+async function startThread() {
   conversationId = newConversationId();
   thread.innerHTML = "";
   const c = context();
   $("ctx-line").textContent = `${c.decline_code} · ${c.processor} · ${c.language}`;
-  bubble("sys", `Payment failed: ${c.amount} ${c.currency} · ${c.decline_code}`);
-  await send(""); // initial failed-payment event
-};
+  bubble("sys", `⚡ Webhook: payment failed — ${c.amount} ${c.currency} · ${c.decline_code}`);
+  await send(""); // initial failed-payment event → the agent opens the conversation
+}
+$("start").onclick = startThread;
 
 $("send").onclick = async () => {
-  if (!conversationId) { bubble("sys", "Click 'Start' first."); return; }
+  if (!conversationId) return;
   const text = $("msg").value.trim();
   if (!text) return;
   $("msg").value = "";
@@ -189,6 +199,10 @@ $("send").onclick = async () => {
   await send(text);
 };
 $("msg").addEventListener("keydown", (e) => { if (e.key === "Enter") $("send").click(); });
+
+// Auto-open on load: the customer receives the agent's message immediately, like a
+// real WhatsApp ping — no need to click anything to start the conversation.
+startThread();
 </script>
 </body>
 </html>

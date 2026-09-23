@@ -86,9 +86,11 @@ curl -X POST http://localhost:8000/chat -H 'content-type: application/json' -d '
   "processor": "paystack", "language": "english", "amount": 5000
 }'
 
-# Provider abstraction smoke test + per-conversation cost report
-curl -X POST http://localhost:8000/llm/ping -H 'content-type: application/json' -d '{"message":"hi"}'
-curl http://localhost:8000/llm/cost
+# Provider abstraction smoke test + per-conversation cost report (admin: needs
+# RECOUP_API_KEY set in .env; admin endpoints return 503 while it's unset)
+curl -X POST http://localhost:8000/llm/ping -H "X-API-Key: $RECOUP_API_KEY" \
+  -H 'content-type: application/json' -d '{"message":"hi"}'
+curl http://localhost:8000/llm/cost -H "X-API-Key: $RECOUP_API_KEY"
 ```
 
 ## The eval harness
@@ -122,15 +124,21 @@ drove two rounds of fixes:
    misrouted → reclassified greetings/unclear as continuing the conversation and
    affirmatives as `pay_later`. Routing and action reached **100%**.
 
-| Metric | v1 | current |
-| --- | --- | --- |
-| **Routing accuracy** | 96% | **100%** |
-| **Action correctness** | **86%** | **100%** |
-| Tone (LLM judge) | 0.86 | 0.86 |
-| Language pass rate (Pidgin) | 100% | 100% |
-| Avg cost / conversation | $0.0103 | $0.0087 |
+| Metric | v1 | v2 | current |
+| --- | --- | --- | --- |
+| **Routing accuracy** | 96% | **100%** | **100%** |
+| **Action correctness** | **86%** | **100%** | **100%** |
+| Tone (LLM judge) | 0.86 | 0.86 | 0.88 |
+| Language pass rate (Pidgin) | 100% | 100% | 100% |
+| Avg cost / conversation | $0.0103 | $0.0087 | $0.0115 |
 
-Run on `claude-opus-4-8`, 28 scenarios. The v1 baseline is preserved at
+The current column is after adding scheduled retries and processor triggers, which
+lengthened the Negotiator prompt (date, trigger, payment status, `retry_at`) — hence
+the cost increase. A rerun after that change flagged "later" routing to `new_failure`
+and a flat reply when a customer came back as promised; both were fixed in the prompt.
+
+Run on `claude-opus-4-8`, 28 scenarios (current run without a database, i.e. built-in
+retrieval strategies, as in the nightly CI gate). The v1 baseline is preserved at
 [eval/scorecard_v1.md](eval/scorecard_v1.md); the current run is
 [eval/scorecard.md](eval/scorecard.md). This is the "read the failures, fix the
 prompts/graph, re-run" loop the eval harness exists for.
@@ -152,7 +160,50 @@ All via `.env` (see [.env.example](.env.example)):
 | `LLM_PRIMARY` / `LLM_FALLBACK` | Provider order (`anthropic` \| `openai`) |
 | `ANTHROPIC_MODEL` | Default `claude-opus-4-8` |
 | `OPENAI_MODEL` | Default `gpt-4o` |
-| `DATABASE_URL` | Postgres (host `db` inside compose) |
+| `DATABASE_URL` | Postgres (host `db` inside compose). Memory, retries and outcomes need it |
+| `RECOUP_API_KEY` | Admin endpoints' `X-API-Key`; they're disabled while it's empty |
+| `MAX_COST_PER_CONVERSATION` / `MAX_DAILY_COST_USD` | Spend caps (per conversation / all traffic per rolling 24h) |
+| `PAYSTACK_SECRET_KEY` | Enables `/webhooks/paystack`, real checkout links and saved-card retries |
+| `FLUTTERWAVE_SECRET_KEY` / `FLUTTERWAVE_SECRET_HASH` | Flutterwave checkout links / `/webhooks/flutterwave` verification |
+| `WHATSAPP_*` | WhatsApp Cloud API channel (see below) |
+| `WEBHOOK_SECRET` | HMAC secret for the processor-neutral `/events/*` webhooks |
+| `PUBLIC_BASE_URL` | This deployment's URL, so demo checkout links are absolute |
+
+## Going live: processors and WhatsApp
+
+Every integration is off until its keys are set; until then the app runs in demo
+mode (browser thread, simulated checkout at `/demo/checkout/…`, reminders instead of
+card re-charges). The full lifecycle once connected:
+
+```
+Paystack invoice.payment_failed ─┐                        ┌─ WhatsApp: opening template
+Flutterwave charge.completed ────┼─▶ open conversation ───┤   (name, amount, checkout link)
+POST /events/payment-failed ─────┘   (background turn)    └─ outcome: pending
+                                              │
+         customer replies on WhatsApp ───────▶ turn ─▶ reply on WhatsApp
+                                              │
+                    SCHEDULE_RETRY ──▶ retry queue ──(due)──▶ re-charge saved card (Paystack)
+                                                              or remind with a fresh link
+                                              │
+Paystack charge.success / Flutterwave successful ─▶ outcome: recovered, retries cancelled,
+POST /events/payment-succeeded                       thank-you message
+```
+
+1. **Paystack.** Set `PAYSTACK_SECRET_KEY` (test mode works) and point the dashboard's
+   webhook URL at `https://<host>/webhooks/paystack`. Paystack signs webhooks with the
+   secret key, so nothing else is needed. The customer's email comes from the event and
+   is required to create checkout links.
+2. **Flutterwave.** Set `FLUTTERWAVE_SECRET_KEY`, choose a secret hash in the dashboard
+   and set it as `FLUTTERWAVE_SECRET_HASH`, and use `https://<host>/webhooks/flutterwave`.
+   Set `PAYMENT_REDIRECT_URL` for the post-checkout page.
+3. **WhatsApp Cloud API.** From a Meta Business app: `WHATSAPP_ACCESS_TOKEN`,
+   `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`, and any `WHATSAPP_VERIFY_TOKEN`;
+   subscribe the webhook to `https://<host>/webhooks/whatsapp` (messages field).
+   WhatsApp only lets a business open a conversation with an **approved template**:
+   create one whose body takes `{{1}}` name, `{{2}}` amount, `{{3}}` link, and set its
+   name as `WHATSAPP_OPENING_TEMPLATE`. Replies after the customer answers are free text
+   written by the agent. Customers are matched to conversations by phone number, taken
+   from the processor event (`DEFAULT_COUNTRY_CODE` normalises local numbers).
 
 ## Engineering decisions and tradeoffs
 
@@ -191,28 +242,35 @@ Beyond the core demo, the following are implemented:
 | Area | What | Where |
 | --- | --- | --- |
 | Reliability | Pooling (health-checked), retry/backoff + provider fallback, JSON-truncation retry, per-turn timeout, request-id tracing, idempotent + HMAC-verified webhook | `llm/client.py`, `app/db.py`, `app/main.py` |
-| Auth | `X-API-Key` on write/admin endpoints, per-IP rate limit | `app/auth.py` |
-| Safety | Prompt-injection guard + optional OpenAI moderation → handoff; per-conversation spend cap (DB-backed); action-schema validation | `graph/safety.py`, `graph/actions.py`, `app/main.py` |
+| Auth | Fail-closed `X-API-Key` on admin endpoints (disabled until `RECOUP_API_KEY` is set); fail-closed webhook signature check; proxy-aware per-IP rate limit | `app/auth.py`, `app/main.py` |
+| Safety | Prompt-injection guard (message + name) + optional OpenAI moderation → handoff; per-conversation **and** global 24h spend caps; bounded, validated inputs; action-schema validation; XSS-safe demo UI | `graph/safety.py`, `graph/actions.py`, `app/main.py` |
 | Concurrency | Per-conversation advisory lock so parallel turns don't clobber memory | `app/db.py` |
 | Migrations & scale | Alembic migrations; indexes incl. pgvector HNSW; scheduled retention purge | `migrations/`, `app/db.py` |
 | Health & metrics | `/health` (liveness), `/ready` (readiness), `/metrics` (JSON), `/metrics/prometheus`, optional Sentry | `app/main.py` |
 | Human handoff | Every escalation recorded to a `handoffs` queue (`GET /handoffs`); SMTP email when configured | `app/notify.py`, `app/db.py` |
 | Observability | Per-call metadata persisted (`llm_calls`); `GET /metrics` aggregates cost/latency/provider | `app/db.py` |
-| Feedback loop | Record conversation outcomes (`POST /outcome`); fold winning strategies back into RAG (`POST /playbook`) | `app/main.py` |
+| Processor integration | Paystack + Flutterwave webhooks (verified, idempotent) open and close recovery conversations; real hosted-checkout links | `app/payments.py`, `app/main.py` |
+| Channel | WhatsApp Cloud API: template opener, free-text replies, signed inbound webhook routed by phone | `app/whatsapp.py` |
+| Retry engine | `SCHEDULE_RETRY` → Postgres queue (SKIP LOCKED, multi-worker safe) → saved-card re-charge or reminder on the agreed day | `app/recovery.py`, `app/db.py` |
+| Feedback loop | Outcomes recorded automatically (pending → scheduled/escalated → recovered on payment); manual override via `POST /outcome`; fold winning strategies back into RAG (`POST /playbook`) | `app/recovery.py`, `app/main.py` |
 | Analytics | Dashboard at `/dashboard` (recovery rate, revenue recovered, cost, funnel) | `app/static/dashboard.html` |
 | Localisation | English, Nigerian Pidgin, Spanish, French, Swahili | `graph/prompts.py` |
 | PII/compliance | Generated text kept out of logs; data-retention purge; posture in [COMPLIANCE.md](COMPLIANCE.md) | `llm/client.py`, `app/db.py` |
-| Testing/CI | 21 pytest tests run in GitHub Actions | `tests/`, `.github/workflows/ci.yml` |
+| Testing/CI | 88 pytest tests (unit, security, recovery flow, DB integration) run in GitHub Actions | `tests/`, `.github/workflows/ci.yml` |
 
 ## Known limitations / what I'd do for production
 
-- **Synthetic data, demo mode.** The failed-payment webhook and payment link are
-  scaffolded but not wired to live Paystack/Flutterwave; WhatsApp is a browser
-  stand-in for the Business API.
-- **Retry engine.** `SCHEDULE_RETRY` records intent; a production system needs a job
-  queue to actually re-attempt charges at payday-timed moments.
-- **Vector DB scaling.** pgvector is right for this size; at scale I'd add an IVFFlat/
-  HNSW index and consider a dedicated vector DB.
+- **Integrations verified against documented payloads, not live accounts.** The
+  Paystack, Flutterwave and WhatsApp adapters are built and tested against their
+  documented webhook/API shapes with synthetic data; they haven't yet been exercised
+  against real merchant accounts, which would be the first step before real customers.
+- **Retry timing.** Retries fire at 08:00 UTC on the day the customer named (the model
+  resolves "Friday" to a date and it's validated to fall within 60 days). A production
+  system would learn per-customer payday patterns and respect quiet hours per timezone.
+- **Only Paystack re-charges saved cards.** Flutterwave retries send a reminder with a
+  fresh link instead of a tokenized charge.
+- **Vector DB scaling.** pgvector with an HNSW index is right for this size; at much
+  larger scale I'd consider a dedicated vector DB.
 - **Multi-tenancy.** API-key auth and rate limiting exist, but there's no per-merchant
   isolation, onboarding, or billing yet.
 - **Eval coverage.** 28 scenarios is a credible start (now gated nightly in CI via
@@ -227,10 +285,15 @@ Postgres (with `pgvector`):
 1. Push this repo to GitHub.
 2. In Render: **New + → Blueprint**, select the repo. It reads `render.yaml`.
 3. Set `ANTHROPIC_API_KEY` (and optionally `OPENAI_API_KEY`) in the dashboard —
-   they're marked `sync:false` so they're never committed.
-4. After the first deploy, open the service **Shell** and run once:
-   `python -m rag.ingest` to load the knowledge base.
+   they're marked `sync:false` so they're never committed. `RECOUP_API_KEY` is
+   generated automatically (copy it from the dashboard to call admin endpoints);
+   set `WEBHOOK_SECRET` to enable the payment webhook. The public demo is capped at
+   `MAX_DAILY_COST_USD` of LLM spend per rolling 24h.
+4. The knowledge base is loaded automatically on first startup when the store is
+   empty (`python -m rag.ingest` from the service **Shell** reloads it manually).
 5. Health check: `GET /health`. Demo: `/`. Dashboard: `/dashboard`.
+6. Optional: set `PUBLIC_BASE_URL` to the service URL, then connect processors and
+   WhatsApp as described in [Going live](#going-live-processors-and-whatsapp).
 
 A `Procfile` is included for Railway/Fly/Heroku-style platforms; the `Dockerfile`
 + `docker-compose.yml` work for any container host.

@@ -115,8 +115,26 @@ function bubble(cls, text) {
   thread.scrollTop = thread.scrollHeight;
 }
 
+// Unguessable id: the conversation id is the only handle on a thread, so it must
+// not be enumerable.
 function newConversationId() {
-  return "demo-" + Math.random().toString(36).slice(2, 10);
+  if (crypto.randomUUID) return "demo-" + crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  return "demo-" + Array.from(b, x => x.toString(16).padStart(2, "0")).join("");
+}
+
+// Build DOM with textContent only — replies, promises and schedule text are model
+// output shaped by customer input, so they must never be parsed as HTML.
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+function line(label, ...children) {
+  const d = el("div", null, label);
+  children.forEach(c => d.append(c));
+  return d;
 }
 
 function context() {
@@ -131,17 +149,37 @@ function context() {
 }
 
 function renderMeta(data) {
-  const link = data.action && data.action.type === "SEND_PAYMENT_LINK"
-    ? '<div>🔗 <span class="tag action">payment link attached</span></div>' : "";
-  $("meta").innerHTML = `
-    <div>Route: <span class="tag">${data.route}</span></div>
-    <div>Action: <span class="tag action">${data.action ? data.action.type : "—"}</span>
-      ${data.action && data.action.schedule_for ? "· " + data.action.schedule_for : ""}</div>
-    ${link}
-    <div>Promises: ${(data.promises || []).map(p => '<span class="tag">'+p+'</span>').join(" ") || '<span class="muted">none</span>'}</div>
-    <div>Retrieved from: ${(data.strategy_sources || []).join(", ") || "—"}</div>
-    <div>Cost so far: <span class="tag">$${(data.cost && data.cost.total_cost_usd || 0).toFixed(5)}</span></div>
-  `;
+  const action = data.action || {};
+  const meta = $("meta");
+  meta.replaceChildren();
+  meta.append(line("Route: ", el("span", "tag", String(data.route ?? "—"))));
+  const actionLine = line("Action: ", el("span", "tag action", String(action.type || "—")));
+  if (action.schedule_for) actionLine.append(" · " + String(action.schedule_for));
+  meta.append(actionLine);
+  if (action.type === "SEND_PAYMENT_LINK") {
+    meta.append(line("🔗 ", el("span", "tag action", "payment link attached")));
+  }
+  if (data.retry_scheduled_for) {
+    const when = new Date(data.retry_scheduled_for);
+    meta.append(line("⏰ Retry scheduled: ",
+      el("span", "tag", isNaN(when) ? String(data.retry_scheduled_for) : when.toLocaleString())));
+  }
+  const promises = (data.promises || []).map(p => el("span", "tag", String(p)));
+  const promiseLine = line("Promises: ");
+  if (promises.length) promises.forEach((p, i) => promiseLine.append(i ? " " : "", p));
+  else promiseLine.append(el("span", "muted", "none"));
+  meta.append(promiseLine);
+  meta.append(line("Retrieved from: " + ((data.strategy_sources || []).join(", ") || "—")));
+  const cost = Number(data.cost && data.cost.total_cost_usd) || 0;
+  meta.append(line("Cost so far: ", el("span", "tag", "$" + cost.toFixed(5))));
+}
+
+// Only render the payment link if it's https or this app's own demo checkout.
+function safeLink(raw) {
+  try {
+    const u = new URL(raw, location.origin);
+    return u.protocol === "https:" || u.origin === location.origin ? u.href : null;
+  } catch { return null; }
 }
 
 async function send(message) {
@@ -162,10 +200,14 @@ async function send(message) {
     if (!res.ok) { bubble("sys", "Error: " + (await res.text())); return; }
     const data = await res.json();
     bubble("in", data.reply || "(no reply)");
-    if (data.payment_link) {
-      const b = document.createElement("div");
-      b.className = "bubble in";
-      b.innerHTML = '💳 <a href="' + data.payment_link + '" target="_blank" rel="noopener">Complete payment →</a>';
+    const href = data.payment_link && safeLink(data.payment_link);
+    if (href) {
+      const b = el("div", "bubble in", "💳 ");
+      const a = el("a", null, "Complete payment →");
+      a.href = href;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      b.append(a);
       thread.appendChild(b);
       thread.scrollTop = thread.scrollHeight;
     }

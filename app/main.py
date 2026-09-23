@@ -1,32 +1,32 @@
-"""Recoup FastAPI app — Day 1 skeleton.
+"""Recoup FastAPI app.
 
-Exposes a health check (app + database) and a debug endpoint that round-trips a
-prompt through the provider-agnostic LLM client, so the whole Day 1 stack —
-provider abstraction, fallback, and cost logging — is demo-able in a browser
-before the LangGraph agent exists.
+HTTP surface for the recovery agent: the browser demo (`/chat`), processor and
+WhatsApp webhooks, admin/observability endpoints, and a simulated checkout for the
+demo. Turn orchestration lives in `app.recovery`; processor and channel specifics
+live in `app.payments` and `app.whatsapp`.
 """
 
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
+import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeout
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app import db, notify
+from app import db, payments, recovery, whatsapp
 from app.auth import rate_limit, require_api_key
 from app.config import get_settings
 from app.context import request_id_var
-from graph import run_turn
-from graph.actions import Action
+from app.recovery import TurnError
 from llm import LLMError, get_client
 
 logging.basicConfig(level=logging.INFO)
@@ -36,6 +36,18 @@ _STATIC_DIR = Path(__file__).parent / "static"
 # Shared process-wide client — the same instance the graph nodes use, so the
 # cost report reflects calls made inside the graph.
 llm_client = get_client()
+
+# Webhooks must answer the sender quickly; the recovery turn they trigger runs here.
+_BACKGROUND = ThreadPoolExecutor(max_workers=4)
+
+
+def _in_background(fn, *args) -> None:
+    def run():
+        try:
+            fn(*args)
+        except Exception:
+            logging.exception("background task %s failed", getattr(fn, "__name__", fn))
+    _BACKGROUND.submit(run)
 
 
 async def _retention_loop(days: int) -> None:
@@ -47,6 +59,18 @@ async def _retention_loop(days: int) -> None:
             logging.info("retention purge: %s", result)
         except Exception as exc:
             logging.warning("retention purge failed: %s", exc)
+
+
+async def _retry_loop(interval: int) -> None:
+    """Execute SCHEDULE_RETRY actions when they come due."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            ran = await asyncio.to_thread(recovery.run_due_retries)
+            if ran:
+                logging.info("scheduled retries executed: %d", ran)
+        except Exception as exc:
+            logging.warning("retry worker failed: %s", exc)
 
 
 async def _seed_rag_if_empty() -> None:
@@ -68,7 +92,7 @@ async def _seed_rag_if_empty() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup/shutdown: error tracking, DB schema, retention job, pool teardown."""
+    """Startup/shutdown: error tracking, DB schema, background jobs, pool teardown."""
     settings = get_settings()
     if settings.sentry_dsn:  # #13 optional error tracking
         try:
@@ -86,18 +110,19 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # don't block startup if DB is briefly unavailable
             logging.warning("startup: schema init failed: %s", exc)
         tasks.append(asyncio.create_task(_seed_rag_if_empty()))  # auto-seed on first deploy
+        tasks.append(asyncio.create_task(_retry_loop(max(10, settings.retry_poll_seconds))))
         if settings.data_retention_days > 0:
             tasks.append(asyncio.create_task(_retention_loop(settings.data_retention_days)))
     else:
         logging.info("DATABASE_URL not set — running without persistence/RAG store "
-                     "(memory off, retrieval uses built-in strategies)")
+                     "(memory off, retrieval uses built-in strategies, no retries)")
     yield
     for t in tasks:
         t.cancel()
     db.close_pool()
 
 
-app = FastAPI(title="Recoup", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Recoup", version="0.2.0", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -110,7 +135,19 @@ async def request_id_middleware(request: Request, call_next):
     finally:
         request_id_var.reset(token)
     response.headers["x-request-id"] = request_id
+    # Baseline hardening headers for the demo pages and API responses.
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
     return response
+
+
+def _turn_or_http(fn, *args, **kwargs) -> dict:
+    """Map recovery TurnErrors onto HTTP responses."""
+    try:
+        return fn(*args, **kwargs)
+    except TurnError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 
 
 @app.get("/")
@@ -146,23 +183,35 @@ def ready() -> JSONResponse:
     return JSONResponse(body, status_code=200 if is_ready else 503)
 
 
+# Conversation ids are client-chosen, so constrain them: bounded length and a safe
+# charset (they appear in URLs, logs, and advisory-lock keys).
+ConversationId = Annotated[str, Field(min_length=1, max_length=64,
+                                      pattern=r"^[A-Za-z0-9_-]+$")]
+
+
 class PingRequest(BaseModel):
-    message: str = "Reply with a single short sentence confirming you are online."
-    conversation_id: str = "demo"
+    message: str = Field("Reply with a single short sentence confirming you are online.",
+                         max_length=500)
+    conversation_id: ConversationId = "ping"
 
 
-@app.post("/llm/ping")
+@app.post("/llm/ping", dependencies=[Depends(require_api_key), Depends(rate_limit)])
 def llm_ping(req: PingRequest) -> dict:
     """Round-trip a prompt through the LLM client to prove providers + fallback work."""
     settings = get_settings()
+    if recovery.daily_budget_exceeded():
+        raise HTTPException(status_code=503,
+                            detail="daily usage limit reached, please try again later")
     try:
         result = llm_client.complete(
             system="You are Recoup's connectivity check. Keep replies to one sentence.",
             messages=[{"role": "user", "content": req.message}],
             conversation_id=req.conversation_id,
+            max_tokens=100,
         )
     except LLMError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        logging.warning("llm ping failed: %s", exc)
+        raise HTTPException(status_code=502, detail="LLM providers unavailable") from exc
 
     return {
         "reply": result.text,
@@ -177,7 +226,7 @@ def llm_ping(req: PingRequest) -> dict:
     }
 
 
-@app.get("/llm/cost")
+@app.get("/llm/cost", dependencies=[Depends(require_api_key), Depends(rate_limit)])
 def llm_cost() -> dict:
     """Per-conversation, per-provider cost report accumulated this process."""
     return llm_client.cost_report()
@@ -192,129 +241,31 @@ Processor = Literal["paystack", "flutterwave", "mobile_money"]
 Language = Literal["english", "pidgin", "spanish", "french", "swahili"]
 
 
+# Every free-text field below reaches the LLM prompt, so each is length-bounded
+# (cost + injection surface). Names allow letters, spaces and . ' - only.
+CustomerName = Annotated[str, Field(min_length=1, max_length=60, pattern=r"^[\w .'-]+$")]
+Currency = Annotated[str, Field(pattern=r"^[A-Z]{3}$")]
+Amount = Annotated[float, Field(ge=0, le=100_000_000)]
+
+
 class ChatRequest(BaseModel):
-    conversation_id: str
-    message: str = ""               # empty = initial failed-payment event
+    conversation_id: ConversationId
+    message: str = Field("", max_length=1000)  # empty = initial failed-payment event
     # Context for a new conversation (ignored if the conversation already exists).
-    customer_name: str = "there"
+    customer_name: CustomerName = "there"
     decline_code: DeclineCode = "insufficient_funds"
     processor: Processor = "paystack"
     language: Language = "english"
-    amount: float = 0.0
-    currency: str = "NGN"
-
-
-def _payment_link(conversation_id: str) -> str:
-    """Demo payment link. In production this is a real Paystack/Flutterwave URL."""
-    return f"https://pay.recoup.africa/{conversation_id}"
-
-
-# Bounded worker pool so a turn can be given a hard deadline (#8).
-_TURN_EXECUTOR = ThreadPoolExecutor(max_workers=8)
+    amount: Amount = 0.0
+    currency: Currency = "NGN"
 
 
 @app.post("/chat", dependencies=[Depends(rate_limit)])
 def chat(req: ChatRequest) -> dict:
     """Run one turn of the recovery graph, persisting memory across turns."""
-    # Serialise concurrent turns for this conversation so memory isn't clobbered (#3).
-    with db.conversation_lock(req.conversation_id) as acquired:
-        if not acquired:
-            raise HTTPException(status_code=409,
-                                detail="a message for this conversation is already being processed")
-        # #8 hard deadline on the turn so a hung provider can't pin the request.
-        future = _TURN_EXECUTOR.submit(_run_chat, req)
-        try:
-            return future.result(timeout=get_settings().request_timeout_seconds)
-        except FuturesTimeout:
-            raise HTTPException(status_code=504, detail="recovery turn timed out")
-
-
-def _run_chat(req: "ChatRequest") -> dict:
-    prior = None
-    try:
-        prior = db.load_conversation(req.conversation_id)
-    except Exception as exc:
-        logging.warning("chat: could not load memory (continuing fresh): %s", exc)
-
-    if prior is None:
-        # New conversation: seed context from the request.
-        state = {
-            "conversation_id": req.conversation_id,
-            "customer_name": req.customer_name,
-            "decline_code": req.decline_code,
-            "processor": req.processor,
-            "language": req.language,
-            "amount": req.amount,
-            "currency": req.currency,
-            "history": [],
-            "promises": [],
-        }
-    else:
-        state = prior
-
-    state["customer_message"] = req.message
-
-    # Safety (#21): stop spending on a runaway conversation. Use persisted spend
-    # (global across workers) when a DB is present, else the in-process report (#2).
-    settings = get_settings()
-    spent = (db.conversation_cost(req.conversation_id) if db.enabled()
-             else llm_client.cost_report(req.conversation_id).get("total_cost_usd", 0.0))
-    if spent >= settings.max_cost_per_conversation:
-        logging.warning("conversation %s hit spend cap ($%.4f)", req.conversation_id, spent)
-        _handoff(req.conversation_id, state.get("customer_name", "there"),
-                 "spend_cap", req.message)
-        return {
-            "reply": "Thanks — let me bring in a teammate to help you finish this up.",
-            "route": "needs_human",
-            "action": {"type": Action.ESCALATE_TO_HUMAN},
-            "payment_link": None, "promises": state.get("promises", []),
-            "strategy_sources": [], "cost": llm_client.cost_report(req.conversation_id),
-        }
-
-    try:
-        result = run_turn(state)
-    except LLMError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except Exception as exc:
-        # Surface the real cause (and full traceback in the server log) instead of
-        # a generic 500, so failures are debuggable from the browser.
-        logging.exception("chat: graph run failed")
-        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
-
-    try:
-        db.save_conversation(req.conversation_id, result)
-    except Exception as exc:
-        logging.warning("chat: could not persist memory: %s", exc)
-
-    action = result.get("action") or {}
-    # #18 record a human handoff (+ optional email) whenever we escalate.
-    if action.get("type") == Action.ESCALATE_TO_HUMAN:
-        _handoff(req.conversation_id, result.get("customer_name", "there"),
-                 result.get("route", "escalation"), req.message)
-
-    payment_link = (
-        _payment_link(req.conversation_id)
-        if action.get("type") == "SEND_PAYMENT_LINK"
-        else None
-    )
-    return {
-        "reply": result.get("reply", ""),
-        "route": result.get("route"),
-        "action": action,
-        "payment_link": payment_link,
-        "promises": result.get("promises", []),
-        "strategy_sources": result.get("strategy_sources", []),
-        "cost": llm_client.cost_report(req.conversation_id),
-    }
-
-
-def _handoff(conversation_id: str, customer_name: str, reason: str, message: str) -> None:
-    """Record a human handoff to the DB and try to email it (best-effort)."""
-    try:
-        db.record_handoff(conversation_id, customer_name, reason, message)
-    except Exception as exc:
-        logging.warning("could not record handoff: %s", exc)
-    notify.send_handoff_email(conversation_id, customer_name, reason, message)
+    context = req.model_dump(exclude={"conversation_id", "message"})
+    return _turn_or_http(recovery.run_turn_locked, req.conversation_id, req.message,
+                         context=context)
 
 
 @app.get("/handoffs", dependencies=[Depends(require_api_key), Depends(rate_limit)])
@@ -355,23 +306,26 @@ Outcome = Literal["recovered", "scheduled", "escalated", "lost", "pending"]
 
 
 class OutcomeRequest(BaseModel):
-    conversation_id: str
+    conversation_id: ConversationId
     outcome: Outcome
-    amount: float = 0.0
-    currency: str = "NGN"
+    amount: Amount = 0.0
+    currency: Currency = "NGN"
 
 
 @app.post("/outcome", dependencies=[Depends(require_api_key), Depends(rate_limit)])
 def record_outcome(req: OutcomeRequest) -> dict:
-    """Feedback loop (#24): record how a conversation ended."""
+    """Feedback loop (#24): record how a conversation ended (manual override —
+    outcomes are otherwise recorded automatically from processor events)."""
     db.record_outcome(req.conversation_id, req.outcome, req.amount, req.currency)
     return {"ok": True, "stats": db.outcome_stats()}
 
 
 class LearnedStrategy(BaseModel):
-    content: str
-    decline_code: str | None = None
-    processor: str | None = None
+    # This text is fed verbatim into the Negotiator prompt, so it's admin-only
+    # (API key) and bounded.
+    content: str = Field(min_length=1, max_length=2000)
+    decline_code: DeclineCode | None = None
+    processor: Processor | None = None
 
 
 @app.post("/playbook", dependencies=[Depends(require_api_key), Depends(rate_limit)])
@@ -396,39 +350,185 @@ def dashboard_data() -> dict:
     return {"metrics": db.metrics(), "outcomes": db.outcome_stats()}
 
 
+# ─── Webhooks ───────────────────────────────────────────────────────────────
+# All webhooks are fail-closed (disabled until their secret is configured),
+# signature-verified, size-capped, and idempotent on the sender's event id.
+_MAX_WEBHOOK_BYTES = 64 * 1024
+
+
+async def _read_body(request: Request) -> bytes:
+    body = await request.body()
+    if len(body) > _MAX_WEBHOOK_BYTES:
+        raise HTTPException(status_code=413, detail="payload too large")
+    return body
+
+
+def _require(setting: str, name: str) -> None:
+    if not setting:
+        raise HTTPException(status_code=503, detail=f"webhook disabled: {name} is not configured")
+
+
+def _dispatch(evt: payments.PaymentFailure | payments.PaymentSuccess | None) -> dict:
+    """Route a normalised processor event: failures open a recovery conversation
+    in the background; successes close one."""
+    if evt is None:
+        return {"ok": True, "ignored": True}
+    if not db.claim_event(evt.event_id):
+        return {"ok": True, "duplicate": True}
+    if isinstance(evt, payments.PaymentFailure):
+        _in_background(recovery.handle_payment_failed, evt)
+        return {"ok": True, "duplicate": False, "conversation_id": evt.conversation_id}
+    try:
+        matched = recovery.handle_payment_succeeded(evt.conversation_id, evt.amount,
+                                                    evt.currency)
+    except Exception:
+        # Release the claim so the processor's retry of this event is processed.
+        db.release_event(evt.event_id)
+        raise
+    return {"ok": True, "duplicate": False, "recovered": matched,
+            "conversation_id": evt.conversation_id}
+
+
+def _verify_generic(body: bytes, request: Request) -> None:
+    secret = get_settings().webhook_secret
+    _require(secret, "WEBHOOK_SECRET")
+    signature = (request.headers.get("x-signature")
+                 or request.headers.get("x-paystack-signature") or "")
+    expected = hmac.new(secret.encode(), body, hashlib.sha512).hexdigest()
+    if not hmac.compare_digest(signature.encode(), expected.encode()):
+        raise HTTPException(status_code=401, detail="invalid webhook signature")
+
+
 class PaymentEvent(BaseModel):
-    event_id: str            # processor's unique event id (for idempotency)
-    conversation_id: str
-    customer_name: str = "there"
+    """Processor-neutral failed-payment event (for gateways without a native adapter)."""
+    event_id: str = Field(min_length=1, max_length=128)  # sender's unique id (idempotency)
+    conversation_id: ConversationId
+    customer_name: CustomerName = "there"
     decline_code: DeclineCode = "insufficient_funds"
     processor: Processor = "paystack"
-    amount: float = 0.0
-    currency: str = "NGN"
+    amount: Amount = 0.0
+    currency: Currency = "NGN"
+    phone: str | None = Field(None, max_length=20)
+    email: str | None = Field(None, max_length=254)
+
+
+class PaymentSucceededEvent(BaseModel):
+    event_id: str = Field(min_length=1, max_length=128)
+    conversation_id: ConversationId
+    amount: Amount | None = None
+    currency: Currency | None = None
 
 
 @app.post("/events/payment-failed", dependencies=[Depends(rate_limit)])
 async def payment_failed(request: Request) -> dict:
-    """Idempotent, signature-verified failed-payment webhook (#23, #9).
-
-    In production this is called by Paystack/Flutterwave. When WEBHOOK_SECRET is set,
-    the request body is HMAC-SHA512 verified (Paystack-style). Duplicate deliveries
-    (same event_id) are ignored so a retry can't start two recovery threads.
-    """
-    body = await request.body()
-    secret = get_settings().webhook_secret
-    if secret:
-        signature = (request.headers.get("x-signature")
-                     or request.headers.get("x-paystack-signature") or "")
-        expected = hmac.new(secret.encode(), body, hashlib.sha512).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            raise HTTPException(status_code=401, detail="invalid webhook signature")
-
+    """Generic failed-payment webhook (HMAC-SHA512 over the body with WEBHOOK_SECRET).
+    Opens the recovery conversation and sends the first message."""
+    body = await _read_body(request)
+    _verify_generic(body, request)
     try:
         evt = PaymentEvent.model_validate_json(body)
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"invalid event payload: {exc}") from exc
+        raise HTTPException(status_code=422, detail="invalid event payload") from exc
+    return _dispatch(payments.PaymentFailure(**evt.model_dump()))
 
-    if db.already_processed(evt.event_id):
-        return {"ok": True, "duplicate": True}
-    db.mark_processed(evt.event_id)
-    return {"ok": True, "duplicate": False, "conversation_id": evt.conversation_id}
+
+@app.post("/events/payment-succeeded", dependencies=[Depends(rate_limit)])
+async def payment_succeeded(request: Request) -> dict:
+    """Generic payment-succeeded webhook: marks the conversation recovered."""
+    body = await _read_body(request)
+    _verify_generic(body, request)
+    try:
+        evt = PaymentSucceededEvent.model_validate_json(body)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="invalid event payload") from exc
+    return _dispatch(payments.PaymentSuccess(
+        event_id=evt.event_id, conversation_id=evt.conversation_id,
+        amount=evt.amount or 0.0, currency=evt.currency or ""))
+
+
+def _json(body: bytes) -> dict:
+    try:
+        payload = json.loads(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="invalid event payload")
+    return payload
+
+
+@app.post("/webhooks/paystack")
+async def paystack_webhook(request: Request) -> dict:
+    """Paystack events: `invoice.payment_failed` opens a recovery conversation,
+    `charge.success` closes it. Verified with the Paystack secret key."""
+    _require(get_settings().paystack_secret_key, "PAYSTACK_SECRET_KEY")
+    body = await _read_body(request)
+    if not payments.verify_paystack(body, request.headers.get("x-paystack-signature", "")):
+        raise HTTPException(status_code=401, detail="invalid webhook signature")
+    return _dispatch(payments.parse_paystack(_json(body)))
+
+
+@app.post("/webhooks/flutterwave")
+async def flutterwave_webhook(request: Request) -> dict:
+    """Flutterwave `charge.completed` events (failed → recover, successful → close)."""
+    _require(get_settings().flutterwave_secret_hash, "FLUTTERWAVE_SECRET_HASH")
+    body = await _read_body(request)
+    if not payments.verify_flutterwave(request.headers.get("verif-hash", "")):
+        raise HTTPException(status_code=401, detail="invalid webhook signature")
+    return _dispatch(payments.parse_flutterwave(_json(body)))
+
+
+@app.get("/webhooks/whatsapp")
+def whatsapp_verify(request: Request) -> PlainTextResponse:
+    """Meta's one-time subscription handshake: echo the challenge if the token matches."""
+    token = get_settings().whatsapp_verify_token
+    q = request.query_params
+    if (token and q.get("hub.mode") == "subscribe"
+            and hmac.compare_digest(q.get("hub.verify_token", "").encode(), token.encode())):
+        return PlainTextResponse(q.get("hub.challenge", ""))
+    raise HTTPException(status_code=403, detail="verification failed")
+
+
+@app.post("/webhooks/whatsapp")
+async def whatsapp_inbound(request: Request) -> dict:
+    """Customer replies from WhatsApp: each message runs a turn on the customer's
+    conversation (found by phone number) and the reply is sent back on WhatsApp."""
+    _require(get_settings().whatsapp_app_secret, "WHATSAPP_APP_SECRET")
+    body = await _read_body(request)
+    if not whatsapp.verify_signature(body, request.headers.get("x-hub-signature-256", "")):
+        raise HTTPException(status_code=401, detail="invalid webhook signature")
+    accepted = 0
+    for msg in whatsapp.parse_inbound(_json(body)):
+        if not db.claim_event(f"whatsapp:{msg.message_id}"):
+            continue  # Meta redelivers until it gets a 200
+        conversation_id = db.conversation_for_phone(msg.phone)
+        if not conversation_id:
+            logging.info("WhatsApp message from a number with no recovery conversation")
+            continue
+        _in_background(recovery.handle_inbound_message, conversation_id, msg.text)
+        accepted += 1
+    return {"ok": True, "accepted": accepted}
+
+
+# ─── Demo checkout (simulated processor) ────────────────────────────────────
+# Stands in for the hosted checkout when no processor key is configured, so the
+# browser demo can close the loop: pay → conversation marked recovered. Limited to
+# demo mode and to `demo-` conversations, so it can never touch a real one.
+def _demo_conversation(conversation_id: str) -> None:
+    if (not get_settings().demo_mode
+            or not re.fullmatch(r"demo-[A-Za-z0-9_-]{1,59}", conversation_id)):
+        raise HTTPException(status_code=404, detail="not found")
+
+
+@app.get("/demo/checkout/{conversation_id}")
+def demo_checkout_page(conversation_id: str) -> FileResponse:
+    _demo_conversation(conversation_id)
+    return FileResponse(_STATIC_DIR / "checkout.html")
+
+
+@app.post("/demo/checkout/{conversation_id}", dependencies=[Depends(rate_limit)])
+def demo_checkout_pay(conversation_id: str) -> dict:
+    _demo_conversation(conversation_id)
+    if not recovery.handle_payment_succeeded(conversation_id):
+        raise HTTPException(status_code=404,
+                            detail="unknown conversation (is DATABASE_URL configured?)")
+    return {"ok": True, "status": "recovered"}

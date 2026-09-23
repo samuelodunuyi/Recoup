@@ -12,3 +12,6 @@ venv/
 
 # Eval run artifacts (regenerated each run; the scorecards are kept)
 eval/last_run*.json
+
+# Private planning notes (kept locally, not published)
+BRIEF.md

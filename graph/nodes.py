@@ -180,7 +180,8 @@ def escalate_node(state: RecoveryState) -> dict:
     reply = _ESCALATION_REPLY.get((kind, language), _ESCALATION_REPLY[("default", "english")])
     return {
         "reply": reply,
-        "action": {"type": Action.ESCALATE_TO_HUMAN, "schedule_for": None, "promise": None},
+        "action": {"type": Action.ESCALATE_TO_HUMAN, "schedule_for": None, "promise": None,
+                   "retry_at": None},
     }
 
 

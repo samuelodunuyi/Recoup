@@ -2,6 +2,9 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 
+# HTTP client for Paystack / Flutterwave / WhatsApp Cloud API calls
+httpx==0.28.1
+
 # LLM providers
 anthropic==0.116.0
 openai==1.59.6

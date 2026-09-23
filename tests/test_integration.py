@@ -52,6 +52,41 @@ def test_event_idempotency():
     db.mark_processed(evt)  # second time is a no-op, must not raise
 
 
+def test_contacts_map_phone_to_latest_conversation():
+    phone = f"234{uuid.uuid4().int % 10**10:010d}"
+    db.upsert_contact(phone, "conv-a")
+    db.upsert_contact(phone, "conv-b")
+    assert db.conversation_for_phone(phone) == "conv-b"
+
+
+def test_retry_queue_claims_due_once_and_supersedes():
+    from datetime import datetime, timedelta, timezone
+
+    cid = f"it-{uuid.uuid4().hex[:8]}"
+    past = datetime.now(timezone.utc) - timedelta(minutes=1)
+    db.schedule_retry(cid, past + timedelta(days=1))
+    db.schedule_retry(cid, past)  # supersedes the first; only this one is pending
+    assert db.pending_retry(cid) is not None
+    claimed = [r for r in db.claim_due_retries(limit=100) if r[1] == cid]
+    assert len(claimed) == 1
+    assert not [r for r in db.claim_due_retries(limit=100) if r[1] == cid]  # not twice
+    db.finish_retry(claimed[0][0], "done")
+    assert db.pending_retry(cid) is None
+
+
+def test_release_event_allows_reprocessing():
+    evt = f"evt-{uuid.uuid4().hex[:8]}"
+    assert db.claim_event(evt) is True
+    db.release_event(evt)
+    assert db.claim_event(evt) is True
+
+
+def test_claim_event_is_first_delivery_only():
+    evt = f"evt-{uuid.uuid4().hex[:8]}"
+    assert db.claim_event(evt) is True
+    assert db.claim_event(evt) is False
+
+
 def test_conversation_cost_reads_persisted_calls():
     cid = f"it-{uuid.uuid4().hex[:8]}"
     db.record_llm_call({"conversation_id": cid, "provider": "anthropic", "model": "m",

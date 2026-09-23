@@ -36,6 +36,7 @@ def _client_with(providers):
     c._settings = get_settings()
     c._providers = providers
     c._costs = {}
+    c._recent = __import__("collections").deque()
     c._lock = threading.Lock()
     c._sink = None
     return c

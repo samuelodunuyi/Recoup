@@ -17,6 +17,7 @@ import logging
 import re
 import threading
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Protocol
 
@@ -215,6 +216,10 @@ _RETRYABLE_ERRORS = (
 
 
 # ─── Client ─────────────────────────────────────────────────────────────────
+# Cap on conversations held in the in-process cost report (LRU-evicted past this).
+_MAX_TRACKED_CONVERSATIONS = 10_000
+
+
 @dataclass
 class _ConversationCost:
     total_cost_usd: float = 0.0
@@ -236,6 +241,9 @@ class LLMClient:
                 raise ValueError(f"unknown provider {name!r}")
             self._providers.append(cls(self._settings))
         self._costs: dict[str, _ConversationCost] = {}
+        # (timestamp, cost) of recent calls, for the global rolling-24h budget when
+        # no database is configured.
+        self._recent: deque[tuple[float, float]] = deque()
         # FastAPI runs sync endpoints in a threadpool, so the shared cost report can
         # be mutated concurrently — guard it.
         self._lock = threading.Lock()
@@ -316,7 +324,13 @@ class LLMClient:
                 logger.warning("cost sink failed: %s", exc)
 
         with self._lock:
-            bucket = self._costs.setdefault(conversation_id, _ConversationCost())
+            # Re-insert on every call so dict order is least-recently-used first,
+            # then evict the oldest so the report can't grow without bound.
+            bucket = self._costs.pop(conversation_id, None) or _ConversationCost()
+            self._costs[conversation_id] = bucket
+            if len(self._costs) > _MAX_TRACKED_CONVERSATIONS:
+                del self._costs[next(iter(self._costs))]
+            self._recent.append((time.time(), result.cost_usd))
             bucket.total_cost_usd += result.cost_usd
             bucket.by_provider[result.provider] = (
                 bucket.by_provider.get(result.provider, 0.0) + result.cost_usd
@@ -357,6 +371,14 @@ class LLMClient:
                 )
                 return _extract_json(result.text), result
             raise
+
+    def cost_last_24h(self) -> float:
+        """In-process spend across all conversations over the last 24 hours."""
+        cutoff = time.time() - 24 * 3600
+        with self._lock:
+            while self._recent and self._recent[0][0] < cutoff:
+                self._recent.popleft()
+            return sum(cost for _, cost in self._recent)
 
     def cost_report(self, conversation_id: str | None = None) -> dict:
         """Total cost per conversation and per provider (brief §4's tiny report)."""

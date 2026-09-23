@@ -20,7 +20,7 @@ def send_handoff_email(conversation_id: str, customer_name: str, reason: str,
                        last_message: str) -> bool:
     """Email the configured handoff address. Returns True if sent."""
     s = get_settings()
-    if not s.smtp_host:
+    if not (s.smtp_host and s.handoff_email):
         logger.info("handoff email skipped (SMTP not configured) for %s", conversation_id)
         return False
 

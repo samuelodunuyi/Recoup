@@ -159,4 +159,5 @@ if __name__ == "__main__":
         f"avg_latency={s['avg_latency_ms']}ms avg_cost=${s['avg_cost_usd']:.4f} "
         f"tone={s['avg_tone_score']}"
     )
-    print(f"scorecard → {SCORECARD_PATH}")
+    # ASCII arrow: Windows consoles (cp1252) can't encode "→" and would crash here.
+    print(f"scorecard -> {SCORECARD_PATH}")

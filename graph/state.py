@@ -20,6 +20,15 @@ class RecoveryState(TypedDict, total=False):
     language: str              # "english" | "pidgin"
     amount: float
     currency: str              # e.g. "NGN"
+    # Declared so LangGraph carries them through (it drops undeclared keys).
+    phone: str | None          # WhatsApp number, when the channel is live
+    email: str | None          # needed by processors to create checkout links
+    authorization_code: str | None  # Paystack saved card, for scheduled retries
+    status: str                # "open" | "recovered"
+    payment_link: str | None   # cached checkout URL for this failure
+
+    # ─── Why this turn is running ───
+    trigger: str | None        # None (customer spoke) | "payment_failed" | "scheduled_retry"
 
     # ─── This turn's input ───
     customer_message: str      # empty on the initial failed-payment event

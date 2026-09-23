@@ -9,8 +9,13 @@ posture (demo) and what production requires. Naming the gaps is deliberate.
   CVVs, or full card details. Retries and payment links are delegated to the
   processor (Paystack/Flutterwave) via **tokenized** references and hosted
   checkout URLs, keeping Recoup out of PCI-DSS cardholder-data scope (SAQ-A style).
-- Production: verify processor webhooks with signature validation; never log card
-  metadata; annual scope review.
+- Processor and WhatsApp webhooks are signature-verified (Paystack HMAC-SHA512,
+  Flutterwave secret hash, Meta HMAC-SHA256) and disabled until their secret is set.
+  The only card-related value stored is Paystack's opaque `authorization_code`
+  (a processor token, not card data), used for scheduled re-charges.
+- Production: never log card metadata; annual scope review.
+- Contacts: customer phone numbers are stored (`contacts`) to route WhatsApp replies,
+  and are covered by the retention purge.
 
 ## Data protection (Nigeria NDPR / EU GDPR)
 - **Lawful basis & consent:** recovery messaging requires the merchant to have a

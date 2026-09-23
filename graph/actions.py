@@ -6,6 +6,8 @@ surrounding system can act on it deterministically — brief §2, point 3.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from pydantic import BaseModel, ConfigDict, field_validator
 
 
@@ -33,7 +35,11 @@ class Action:
 
 
 def empty_action() -> dict:
-    return {"type": Action.NONE, "schedule_for": None, "promise": None}
+    return {"type": Action.NONE, "schedule_for": None, "promise": None, "retry_at": None}
+
+
+# Furthest ahead a retry may be scheduled; anything beyond is treated as unparsed.
+MAX_RETRY_DAYS = 60
 
 
 class ActionModel(BaseModel):
@@ -45,11 +51,23 @@ class ActionModel(BaseModel):
     type: str = Action.NONE
     schedule_for: str | None = None
     promise: str | None = None
+    retry_at: str | None = None  # ISO date (YYYY-MM-DD) for SCHEDULE_RETRY
 
     @field_validator("type", mode="before")
     @classmethod
     def _valid_type(cls, v: object) -> str:
         return v if v in Action.ALL else Action.NONE
+
+    @field_validator("retry_at", mode="before")
+    @classmethod
+    def _valid_date(cls, v: object) -> str | None:
+        """Keep only a real date between today and MAX_RETRY_DAYS ahead."""
+        try:
+            d = date.fromisoformat(str(v)[:10])
+        except (TypeError, ValueError):
+            return None
+        today = date.today()
+        return d.isoformat() if today <= d <= today + timedelta(days=MAX_RETRY_DAYS) else None
 
     @field_validator("schedule_for", "promise", mode="before")
     @classmethod

@@ -29,6 +29,40 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      # Admin endpoints (/handoffs, /metrics, /outcome, /playbook, /llm/*) are
+      # disabled unless this is set; Render generates a random value. Read it from
+      # the dashboard and send it as the X-API-Key header.
+      - key: RECOUP_API_KEY
+        generateValue: true
+      # Webhook HMAC secret; /events/payment-failed is disabled until it's set.
+      - key: WEBHOOK_SECRET
+        sync: false
+      # Render's proxy appends the real client IP to X-Forwarded-For.
+      - key: TRUST_PROXY_HEADERS
+        value: "true"
+      # Global LLM spend cap per rolling 24h (USD) for the public demo.
+      - key: MAX_DAILY_COST_USD
+        value: "5"
+      # Optional live integrations — leave unset to stay in demo mode (see README
+      # "Going live"). Set PUBLIC_BASE_URL to this service's URL.
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: FLUTTERWAVE_SECRET_KEY
+        sync: false
+      - key: FLUTTERWAVE_SECRET_HASH
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_APP_SECRET
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_OPENING_TEMPLATE
+        sync: false
 
 databases:
   - name: recoup-db

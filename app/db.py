@@ -95,6 +95,18 @@ def conversation_cost(conversation_id: str) -> float:
         return float(cur.fetchone()[0])
 
 
+def cost_last_24h() -> float:
+    """Total LLM spend across all conversations over the last 24 hours."""
+    if not enabled():
+        return 0.0
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT coalesce(sum(cost_usd), 0) FROM llm_calls "
+            "WHERE created_at > now() - interval '24 hours'"
+        )
+        return float(cur.fetchone()[0])
+
+
 def close_pool() -> None:
     global _pool
     if _pool is not None:
@@ -188,6 +200,32 @@ def init_schema() -> None:
             )
             """
         )
+        # WhatsApp phone → conversation, so inbound replies reach the right thread.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS contacts (
+                phone           TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+        # Retry queue: SCHEDULE_RETRY actions become rows the retry worker executes.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduled_retries (
+                id              SERIAL PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                due_at          TIMESTAMPTZ NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_retries_due ON scheduled_retries (due_at) "
+                    "WHERE status = 'pending'")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_retries_conv ON scheduled_retries "
+                    "(conversation_id)")
         # Indexes (#11): keep lookups/aggregations fast as tables grow.
         cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_conv ON llm_calls (conversation_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_created ON llm_calls (created_at)")
@@ -257,15 +295,139 @@ def mark_processed(event_id: str) -> None:
         conn.commit()
 
 
+def claim_event(event_id: str) -> bool:
+    """Atomically record an inbound event. Returns True only for the first delivery,
+    so two concurrent retries of the same event can't both be processed (#23)."""
+    if not enabled():
+        return True
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO processed_events (event_id) VALUES (%s) "
+            "ON CONFLICT DO NOTHING RETURNING event_id",
+            (event_id,),
+        )
+        claimed = cur.fetchone() is not None
+        conn.commit()
+        return claimed
+
+
+def release_event(event_id: str) -> None:
+    """Undo claim_event when processing failed, so a redelivery is handled."""
+    if not enabled():
+        return
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM processed_events WHERE event_id = %s", (event_id,))
+        conn.commit()
+
+
+# ─── Contacts (WhatsApp phone → conversation) ───────────────────────────────
+def upsert_contact(phone: str, conversation_id: str) -> None:
+    if not enabled():
+        return
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO contacts (phone, conversation_id) VALUES (%s, %s)
+               ON CONFLICT (phone) DO UPDATE
+               SET conversation_id = EXCLUDED.conversation_id, updated_at = now()""",
+            (phone, conversation_id),
+        )
+        conn.commit()
+
+
+def conversation_for_phone(phone: str) -> str | None:
+    if not enabled():
+        return None
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT conversation_id FROM contacts WHERE phone = %s", (phone,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+# ─── Scheduled retries ──────────────────────────────────────────────────────
+def schedule_retry(conversation_id: str, due_at) -> None:
+    """Replace any pending retry for this conversation with one due at `due_at`."""
+    if not enabled():
+        return
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE scheduled_retries SET status = 'superseded' "
+            "WHERE conversation_id = %s AND status = 'pending'",
+            (conversation_id,),
+        )
+        cur.execute(
+            "INSERT INTO scheduled_retries (conversation_id, due_at) VALUES (%s, %s)",
+            (conversation_id, due_at),
+        )
+        conn.commit()
+
+
+def cancel_retries(conversation_id: str) -> None:
+    if not enabled():
+        return
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE scheduled_retries SET status = 'cancelled' "
+            "WHERE conversation_id = %s AND status = 'pending'",
+            (conversation_id,),
+        )
+        conn.commit()
+
+
+def claim_due_retries(limit: int = 20) -> list[tuple[int, str]]:
+    """Atomically take due retries (SKIP LOCKED, so several workers can poll)."""
+    if not enabled():
+        return []
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """UPDATE scheduled_retries SET status = 'running'
+               WHERE id IN (
+                   SELECT id FROM scheduled_retries
+                   WHERE status = 'pending' AND due_at <= now()
+                   ORDER BY due_at LIMIT %s
+                   FOR UPDATE SKIP LOCKED)
+               RETURNING id, conversation_id""",
+            (limit,),
+        )
+        rows = cur.fetchall()
+        conn.commit()
+        return [(r[0], r[1]) for r in rows]
+
+
+def finish_retry(retry_id: int, status: str) -> None:
+    if not enabled():
+        return
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE scheduled_retries SET status = %s WHERE id = %s", (status, retry_id))
+        conn.commit()
+
+
+def pending_retry(conversation_id: str) -> str | None:
+    """ISO timestamp of the conversation's pending retry, if any."""
+    if not enabled():
+        return None
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT due_at FROM scheduled_retries WHERE conversation_id = %s "
+            "AND status = 'pending' ORDER BY due_at LIMIT 1",
+            (conversation_id,),
+        )
+        row = cur.fetchone()
+        return row[0].isoformat() if row else None
+
+
 def purge_old_data(days: int) -> dict:
     """Data-retention (#22): delete records older than `days`. Returns row counts."""
     if not enabled():
         return {"enabled": False}
     deleted = {}
     with connect() as conn, conn.cursor() as cur:
-        for table in ("llm_calls", "conversations", "handoffs", "outcomes", "processed_events"):
-            col = "updated_at" if table == "conversations" else \
-                  "processed_at" if table == "processed_events" else "created_at"
+        columns = {
+            "llm_calls": "created_at", "conversations": "updated_at",
+            "handoffs": "created_at", "outcomes": "created_at",
+            "processed_events": "processed_at", "contacts": "updated_at",
+            "scheduled_retries": "created_at",
+        }
+        for table, col in columns.items():
             cur.execute(
                 f"DELETE FROM {table} WHERE {col} < now() - make_interval(days => %s)",
                 (days,),

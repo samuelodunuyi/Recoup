@@ -6,7 +6,8 @@ services:
       POSTGRES_PASSWORD: recoup
       POSTGRES_DB: recoup
     ports:
-      - "5432:5432"
+      # Loopback only — don't expose the dev database (default password) to the LAN.
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Runs once on first init: enables the pgvector extension for Day 3's RAG store.
@@ -19,6 +20,8 @@ services:
 
   app:
     build: .
+    # Live-reload for local development (the image itself runs without --reload).
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     env_file: .env
     environment:
       # Override the .env default (host `db`) so the app reaches the compose service.

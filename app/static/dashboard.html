@@ -58,17 +58,21 @@ const OUTCOME_COLORS = {
 };
 const PROVIDER_COLORS = { anthropic:"#7a5cc4", openai:"#2e9e6b" };
 
+// Values come from the database, so escape them before building HTML.
+const esc = (s) => String(s).replace(/[&<>"']/g, ch =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+
 function tile(label, value, sub) {
-  return `<div class="tile"><div class="label">${label}</div>
-    <div class="value">${value}</div><div class="sub">${sub||""}</div></div>`;
+  return `<div class="tile"><div class="label">${esc(label)}</div>
+    <div class="value">${esc(value)}</div><div class="sub">${esc(sub||"")}</div></div>`;
 }
 function bars(obj, colors) {
-  const max = Math.max(1, ...Object.values(obj).map(v => typeof v==="object"?v.calls:v));
+  const max = Math.max(1, ...Object.values(obj).map(v => Number(typeof v==="object"?v.calls:v) || 0));
   return Object.entries(obj).map(([k,v]) => {
-    const n = typeof v==="object" ? v.calls : v;
+    const n = Number(typeof v==="object" ? v.calls : v) || 0;
     const w = Math.round((n/max)*100);
-    const c = colors[k] || "#8a929b";
-    return `<div class="bar-row"><span class="name">${k}</span>
+    const c = Object.hasOwn(colors, k) ? colors[k] : "#8a929b";
+    return `<div class="bar-row"><span class="name">${esc(k)}</span>
       <span class="bar-track"><span class="bar-fill" style="width:${w}%;background:${c}"></span></span>
       <span class="n">${n}</span></div>`;
   }).join("") || '<p class="muted">No data yet.</p>';

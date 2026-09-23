@@ -127,18 +127,3 @@ regression gate.
 - **No multi-tenancy** — no per-merchant isolation, onboarding or billing yet.
 - **Eval coverage** is 28 scenarios; production would grow it from real, anonymised
   conversations.
-
-## Deploying
-
-A [`render.yaml`](render.yaml) blueprint provisions the web service and a Postgres
-database with pgvector. In Render, choose **New + → Blueprint**, select the repo, and
-set `ANTHROPIC_API_KEY` (optionally `OPENAI_API_KEY`). An admin API key is generated
-automatically, and public LLM spend is capped per day. A `Dockerfile` and `Procfile`
-cover other hosts.
-
-## More docs
-
-- [Configuration](docs/configuration.md) — every environment variable
-- [Going live](docs/going-live.md) — connecting Paystack, Flutterwave and WhatsApp
-- [Production features & observability](docs/production.md)
-- [Compliance & data handling](COMPLIANCE.md)
